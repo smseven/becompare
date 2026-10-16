@@ -1,0 +1,87 @@
+; crash.asm - debugging aid: unhandled exception filter that writes the fault state to a text file
+%include "inc/macros.inc"
+%include "inc/win.inc"
+extern AddVectoredExceptionHandler, CreateFileA, WriteFile, CloseHandle, _snprintf, ExitProcess
+extern g_hinst
+global crash_install
+
+section .rdata
+s_path: db "C:\Users\charles\AppData\Local\Temp\bc_crash.txt", 0
+f_head: db "code=%08x addr=%llx rip=%llx rsp=%llx base=%llx", 10, "rax=%llx rcx=%llx rdx=%llx rbx=%llx", 10, "rbp=%llx rsi=%llx rdi=%llx r8=%llx", 10, "r12=%llx r13=%llx r14=%llx r15=%llx", 10, 0
+f_q: db "%llx", 10, 0
+
+section .text
+crash_install:
+    PROLOG 64
+    invoke AddVectoredExceptionHandler, 1, &crash_filter
+    EPILOG 64
+
+crash_filter:
+    PROLOG 4000
+    mov rsi, rcx
+    mov rdi, [rsi+8]                 ; CONTEXT
+    mov rbx, [rsi]                   ; EXCEPTION_RECORD
+    cmp dword [rbx], 0xC0000005
+    je .go
+    xor eax, eax
+    EPILOG 4000
+.go:
+    mov eax, [rbx]
+    mov r12, [rbx+16]
+    mov r13, [rdi+0xF8]
+    mov r14, [rdi+0x98]
+    ; head (args: buf,n,fmt, code, addr, rip, rsp, base, rax, rcx, rdx, rbx, rbp, rsi, rdi, r8, r12..r15)
+    mov r15, [rdi+0x78]
+    mov [rsp+32], r12
+    mov [rsp+40], r13
+    mov [rsp+48], r14
+    mov rcx, [g_hinst]
+    mov [rsp+56], rcx
+    mov [rsp+64], r15
+    mov rcx, [rdi+0x80]
+    mov [rsp+72], rcx
+    mov rcx, [rdi+0x88]
+    mov [rsp+80], rcx
+    mov rcx, [rdi+0x90]
+    mov [rsp+88], rcx
+    mov rcx, [rdi+0xA0]
+    mov [rsp+96], rcx
+    mov rcx, [rdi+0xA8]
+    mov [rsp+104], rcx
+    mov rcx, [rdi+0xB0]
+    mov [rsp+112], rcx
+    mov rcx, [rdi+0xB8]
+    mov [rsp+120], rcx
+    mov rcx, [rdi+0xE0]
+    mov [rsp+128], rcx
+    mov rcx, [rdi+0xE8]
+    mov [rsp+136], rcx
+    mov rcx, [rdi+0xF0-0]
+    mov [rsp+144], rcx
+    mov rcx, [rdi+0xF0]
+    mov [rsp+152], rcx
+    lea rcx, [rsp+400]
+    mov edx, 1000
+    lea r8, [f_head]
+    mov r9d, eax
+    call _snprintf
+    mov ebp, eax                     ; length so far
+    xor ebx, ebx
+.st:
+    cmp ebx, 40
+    jae .write
+    lea rcx, [rsp+400+rbp]
+    mov edx, 30
+    lea r8, [f_q]
+    mov r9, [r14+rbx*8]
+    call _snprintf
+    add ebp, eax
+    inc ebx
+    jmp .st
+.write:
+    invoke CreateFileA, &s_path, 0x40000000, 0, 0, 2, 0x80, 0
+    mov rbx, rax
+    invoke WriteFile, rbx, &rsp+400, rbp, &rsp+200, 0
+    invoke CloseHandle, rbx
+    invoke ExitProcess, 0xDEAD
+    EPILOG 4000
