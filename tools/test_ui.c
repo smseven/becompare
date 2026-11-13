@@ -517,7 +517,15 @@ static void findChecks(void){
   check(rp.left>=rpe.right&&rr.left>=rp.right&&rp.right-rp.left>=16&&rr.right-rr.left>=40,"folder field, folder button, reset button from left to right");
   search(home,L"");check(!shown(x),"nothing typed: no clear button");
   search(home,L"report");check(shown(x)&&rows(home)==2,"something typed: the clear button shows");
-  SendMessageW(x,BM_CLICK,0,0);
+  /* the click goes to whatever is on top at the centre of the x, as a mouse click would: the field used to
+     cover the button and take the click */
+  {POINT c={(rx.left+rx.right)/2,(rx.top+rx.bottom)/2};ScreenToClient(home,&c);
+   HWND hit=ChildWindowFromPointEx(home,c,CWP_SKIPINVISIBLE);
+   int above=0;for(HWND w=GetWindow(home,GW_CHILD);w;w=GetWindow(w,GW_HWNDNEXT)){if(w==x){above=1;break;}if(w==e)break;}
+   check(above,"the clear button is above the name field");
+   check(hit==x,"the control on top at its centre is the clear button, not the field");
+   POINT in={(rx.right-rx.left)/2,(rx.bottom-rx.top)/2};LPARAM l=MAKELPARAM(in.x,in.y);
+   SendMessageW(hit,WM_LBUTTONDOWN,MK_LBUTTON,l);SendMessageW(hit,WM_LBUTTONUP,0,l);}
   GetWindowTextW(e,v,700);check(!v[0]&&!shown(x)&&shown(recent)&&!shown(list),"a click on it empties the field and the search");
   /* reset: every filter back, the name stays */
   check(filtered2(home,L"report",1,L"md",L"beta",1,2)==1,"a search with every filter set");

@@ -20,7 +20,7 @@ extern ShowWindow, SetTimer, KillTimer, InvalidateRect, GetWindowTextW, SetWindo
 extern find_start, find_query2, find_path, fi_state, fi_vis
 extern find_sort, find_time, find_size, find_flags, find_name, find_parent, find_volcount, find_volname
 extern lv_dark_header, fmt_size, FileTimeToLocalFileTime, FileTimeToSystemTime, malloc
-extern browse_folder, GetWindowTextLengthW
+extern browse_folder, GetWindowTextLengthW, SetWindowPos
 extern ShellExecuteW, CreatePopupMenu, AppendMenuW, TrackPopupMenu, DestroyMenu, ScreenToClient, GetWindowRect
 extern OpenClipboard, EmptyClipboard, SetClipboardData, CloseClipboard, GlobalAlloc, GlobalLock, GlobalUnlock
 extern memcpy, wcslen, CharLowerBuffW, set_status
@@ -783,9 +783,11 @@ home_proc:
     shl eax, 16
     mov r14d, eax
     invoke SendMessageW, rbx, 0x00D3, 2, r14             ; EM_SETMARGINS, EC_RIGHTMARGIN: room for the clear button
-    ; created after the field, so above it: a small button at its right end that empties it
+    ; a small button at the right end of the field that empties it. A child window is created below its
+    ; older siblings, so it is raised above the field: otherwise the field covers it and takes its clicks.
     invoke mk, rsi, &cn_button, &s_find_clr, 0x8000, ID_FIND_CLR               ; BS_FLAT
     mov rbx, rax
+    invoke SetWindowPos, rbx, 0, 0, 0, 0, 0, 0x13     ; HWND_TOP; no move, no size, no activation
     invoke ShowWindow, rbx, 0
     invoke tip_add, rbx, &s_tip_find_clr
     invoke mk, rsi, &cn_button, &s_find_dots, WS_TABSTOP, ID_FIND_PBROWSE
