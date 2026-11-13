@@ -20,6 +20,7 @@ extern ShowWindow, SetTimer, KillTimer, InvalidateRect, GetWindowTextW, SetWindo
 extern find_start, find_query2, find_path, fi_state, fi_vis
 extern find_sort, find_time, find_size, find_flags, find_name, find_parent, find_volcount, find_volname
 extern lv_dark_header, fmt_size, FileTimeToLocalFileTime, FileTimeToSystemTime, malloc
+extern browse_folder, GetWindowTextLengthW
 extern ShellExecuteW, CreatePopupMenu, AppendMenuW, TrackPopupMenu, DestroyMenu, ScreenToClient, GetWindowRect
 extern OpenClipboard, EmptyClipboard, SetClipboardData, CloseClipboard, GlobalAlloc, GlobalLock, GlobalUnlock
 extern memcpy, wcslen, CharLowerBuffW, set_status
@@ -42,6 +43,9 @@ global home_register, home_create, ini_path_init, settings_load, recent_add, g_i
 %define ID_FIND_LPATH 3017
 %define ID_FIND_DRIVE 3018
 %define ID_FIND_CLOUD 3019
+%define ID_FIND_RESET 3020
+%define ID_FIND_CLR   3021
+%define ID_FIND_PBROWSE 3022
 %define FIND_TIMER2  78                 ; search a moment after the last key
 %define HF_CAP       4000000            ; results kept (and sorted) at most
 %define HF_DIRSORT   50000              ; sorting by folder builds two paths per comparison
@@ -81,6 +85,12 @@ WSTR s_lbl_ext, "확장자"
 WSTR s_lbl_path, "폴더"
 WSTR s_cue_path, "폴더 경로에 포함"
 WSTR s_tip_find_drive, "이 드라이브에서만 찾습니다"
+WSTR s_find_reset, "필터 초기화"
+WSTR s_find_clr, "×"
+WSTR s_find_dots, "…"
+WSTR s_tip_find_reset, "드라이브·종류·클라우드·확장자·폴더 필터를 모두 처음 상태로 되돌립니다 (검색어는 그대로)"
+WSTR s_tip_find_clr, "검색어 지우기"
+WSTR s_tip_find_pbrowse, "폴더를 골라 폴더 필터에 넣습니다. 그 폴더와 하위 폴더 안에서만 찾습니다"
 WSTR s_tip_find_cloud, "OneDrive 같은 클라우드 저장소 폴더 안의 항목을 포함할지, 뺄지, 그것만 볼지 고릅니다"
 WSTR s_fd_all, "모든 드라이브"
 WSTR s_fc0, "클라우드 포함"
@@ -548,6 +558,24 @@ home_layout:
     invoke GetDlgItem, rsi, ID_FIND_EDIT
     mov [rsp+248], rax
     invoke MoveWindow, [rsp+248], r12, rbp, rdi, [rsp+240], 1
+    ; the clear button sits inside the right end of the name field
+    mov ecx, 23
+    call scl
+    mov ecx, r12d
+    add ecx, edi
+    sub ecx, eax
+    mov [rsp+232], rcx               ; x
+    lea rax, [rbp+2]
+    mov [rsp+200], rax               ; y
+    mov rax, [rsp+240]
+    sub rax, 4
+    mov [rsp+192], rax               ; height
+    mov ecx, 21
+    call scl
+    mov edi, eax                     ; width
+    invoke GetDlgItem, rsi, ID_FIND_CLR
+    mov [rsp+248], rax
+    invoke MoveWindow, [rsp+248], [rsp+232], [rsp+200], rdi, [rsp+192], 1
     mov ecx, 32
     call scl
     add ebp, eax                     ; second row
@@ -578,14 +606,43 @@ home_layout:
     FLEFT ID_FIND_LEXT, 44
     FLEFT ID_FIND_EXT, 120
     FLEFT ID_FIND_LPATH, 30
+    ; ... [ folder field ][...]  [ reset ]: the field takes what the two buttons leave
+    mov ecx, 96
+    call scl
+    mov [rsp+208], rax               ; reset button
+    mov ecx, 28
+    call scl
+    mov [rsp+200], rax               ; folder button
+    mov ecx, 8
+    call scl
+    mov [rsp+192], rax               ; gap
     mov rdi, [rsp+216]
-    sub rdi, [rsp+232]               ; the folder field takes what is left
+    sub rdi, [rsp+232]
+    sub rdi, [rsp+208]
+    sub rdi, [rsp+200]
+    sub rdi, [rsp+192]
+    sub rdi, [rsp+192]
     cmp edi, 40
     jge .fpw
     mov edi, 40
 .fpw:
     invoke GetDlgItem, rsi, ID_FIND_PATH
     mov [rsp+248], rax
+    invoke MoveWindow, [rsp+248], [rsp+232], rbp, rdi, [rsp+240], 1
+    mov rax, [rsp+232]
+    add rax, rdi
+    add rax, [rsp+192]
+    mov [rsp+232], rax
+    invoke GetDlgItem, rsi, ID_FIND_PBROWSE
+    mov [rsp+248], rax
+    mov rdi, [rsp+200]
+    invoke MoveWindow, [rsp+248], [rsp+232], rbp, rdi, [rsp+240], 1
+    mov rax, [rsp+216]
+    sub rax, [rsp+208]
+    mov [rsp+232], rax
+    invoke GetDlgItem, rsi, ID_FIND_RESET
+    mov [rsp+248], rax
+    mov rdi, [rsp+208]
     invoke MoveWindow, [rsp+248], [rsp+232], rbp, rdi, [rsp+240], 1
     mov ecx, 40
     call scl
@@ -717,10 +774,24 @@ home_proc:
     invoke mk, rsi, &cn_button, &s_del_btn, BS_OWNERDRAW|WS_TABSTOP, ID_RDEL
     invoke tip_add, rax, &s_tip_rdel
     ; file search: a text field and a button above the list; its results take the place of the recent sessions
-    invoke mk, rsi, &cn_edit, &s_empty, WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP, ID_FIND_EDIT
+    invoke mk, rsi, &cn_edit, &s_empty, WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP|0x04000000, ID_FIND_EDIT    ; WS_CLIPSIBLINGS
     mov rbx, rax
     invoke SendMessageW, rbx, 0x1501, 1, &s_find_cue     ; EM_SETCUEBANNER
     invoke tip_add, rbx, &s_tip_find_edit
+    mov ecx, 26
+    call scl
+    shl eax, 16
+    mov r14d, eax
+    invoke SendMessageW, rbx, 0x00D3, 2, r14             ; EM_SETMARGINS, EC_RIGHTMARGIN: room for the clear button
+    ; created after the field, so above it: a small button at its right end that empties it
+    invoke mk, rsi, &cn_button, &s_find_clr, 0x8000, ID_FIND_CLR               ; BS_FLAT
+    mov rbx, rax
+    invoke ShowWindow, rbx, 0
+    invoke tip_add, rbx, &s_tip_find_clr
+    invoke mk, rsi, &cn_button, &s_find_dots, WS_TABSTOP, ID_FIND_PBROWSE
+    invoke tip_add, rax, &s_tip_find_pbrowse
+    invoke mk, rsi, &cn_button, &s_find_reset, WS_TABSTOP, ID_FIND_RESET
+    invoke tip_add, rax, &s_tip_find_reset
     invoke mk, rsi, &cn_button, &s_find_btn, WS_TABSTOP, ID_FIND_BTN
     invoke tip_add, rax, &s_tip_find_btn
     ; filters: kind, extensions, folder path
@@ -827,6 +898,12 @@ home_proc:
     je .find_kind
     cmp eax, ID_FIND_CLOUD
     je .find_kind
+    cmp eax, ID_FIND_CLR
+    je .find_clr
+    cmp eax, ID_FIND_RESET
+    je .find_reset
+    cmp eax, ID_FIND_PBROWSE
+    je .find_browse
     cmp eax, ID_RDEL
     je .rdel
     cmp eax, ID_RECENT
@@ -917,9 +994,24 @@ home_proc:
     shr eax, 16
     cmp eax, 0x0300                   ; EN_CHANGE: search a moment after the last key
     jne .def
+    invoke home_find_x, rsi
     invoke SetTimer, rsi, FIND_TIMER2, 250, 0
     xor eax, eax
     EPILOG 192
+.find_clr:                            ; the x in the name field: empty it and keep typing there
+    invoke GetDlgItem, rsi, ID_FIND_EDIT
+    mov rbx, rax
+    invoke SetWindowTextW, rbx, &s_empty
+    invoke SetFocus, rbx
+    invoke home_find_x, rsi
+    jmp .find
+.find_reset:                          ; every filter back to its first state; the name stays
+    invoke home_find_reset, rsi
+    jmp .find
+.find_browse:                         ; choose the folder for the folder filter
+    invoke home_find_browse, rsi
+    test eax, eax
+    jz .none
 .find:
     invoke KillTimer, rsi, FIND_TIMER2
     invoke home_find, rsi
@@ -984,6 +1076,55 @@ home_proc:
     EPILOG 192
 
 ; ---------------------------------------------------------------- file search
+; home_find_x(hwnd): the clear button of the name field shows only while there is something to clear
+home_find_x:
+    PROLOG 64
+    mov rsi, rcx
+    invoke GetDlgItem, rsi, ID_FIND_EDIT
+    invoke GetWindowTextLengthW, rax
+    xor ebx, ebx
+    test eax, eax
+    jz .s
+    mov ebx, 5
+.s:
+    invoke GetDlgItem, rsi, ID_FIND_CLR
+    invoke ShowWindow, rax, rbx
+    EPILOG 64
+
+; home_find_reset(hwnd): all drives, every kind, cloud included, no extensions, no folder
+home_find_reset:
+    PROLOG 64
+    mov rsi, rcx
+    invoke GetDlgItem, rsi, ID_FIND_DRIVE
+    invoke SendMessageW, rax, 0x014E, 0, 0            ; CB_SETCURSEL
+    invoke GetDlgItem, rsi, ID_FIND_KIND
+    invoke SendMessageW, rax, 0x014E, 0, 0
+    invoke GetDlgItem, rsi, ID_FIND_CLOUD
+    invoke SendMessageW, rax, 0x014E, 0, 0
+    invoke GetDlgItem, rsi, ID_FIND_EXT
+    invoke SetWindowTextW, rax, &s_empty
+    invoke GetDlgItem, rsi, ID_FIND_PATH
+    invoke SetWindowTextW, rax, &s_empty
+    EPILOG 64
+
+; home_find_browse(hwnd) -> eax 1 when a folder was chosen: its path becomes the folder filter
+home_find_browse:
+    PROLOG 1200
+    mov rsi, rcx
+    mov word [rsp+96], 0
+    invoke browse_folder, rsi, &rsp+96
+    test eax, eax
+    jz .no
+    cmp word [rsp+96], 0
+    je .no
+    invoke GetDlgItem, rsi, ID_FIND_PATH
+    invoke SetWindowTextW, rax, &rsp+96
+    mov eax, 1
+    EPILOG 1200
+.no:
+    xor eax, eax
+    EPILOG 1200
+
 ; home_find_theme(hwnd): colours of the result list
 home_find_theme:
     PROLOG 64

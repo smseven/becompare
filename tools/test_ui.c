@@ -21,7 +21,14 @@
 #include <wchar.h>
 extern int bc_winmain(HINSTANCE);
 extern uint64_t g_dark, g_nsess;
-extern int browse_folder(HWND,wchar_t*);
+extern int __real_browse_folder(HWND,wchar_t*);
+static wchar_t fakeFolder[700];static int browseCalls,cancelFolder;
+int __wrap_browse_folder(HWND h,wchar_t*out){
+ browseCalls++;
+ if(cancelFolder)return 0;
+ if(fakeFolder[0]){wcscpy(out,fakeFolder);return 1;}
+ return __real_browse_folder(h,out);
+}
 extern uint64_t fi_state, fi_vis, fi_mode;
 extern int find_query(const wchar_t*,uint32_t*,uint32_t);
 extern int find_query2(const wchar_t*,uint32_t*,uint32_t,const void*);
@@ -52,6 +59,9 @@ extern uint32_t th_lonly, th_ronly, th_conf;
 #define ID_FIND_PATH 3015
 #define ID_FIND_DRIVE 3018
 #define ID_FIND_CLOUD 3019
+#define ID_FIND_RESET 3020
+#define ID_FIND_CLR 3021
+#define ID_FIND_PBROWSE 3022
 #define IDM_LIGHT 1030
 #define IDM_DARK 1031
 
@@ -328,7 +338,7 @@ static void browseChecks(void){
  MONITORINFO mi;mi.cbSize=sizeof mi;GetMonitorInfoW(MonitorFromWindow(frame,MONITOR_DEFAULTTOPRIMARY),&mi);
  SetWindowPos(frame,NULL,mi.rcWork.right-260,mi.rcWork.bottom-120,900,700,SWP_NOZORDER|SWP_NOACTIVATE);
  HANDLE t=CreateThread(NULL,0,dialogWatcher,NULL,0,NULL);
- wchar_t out[520]={0};int r=browse_folder(frame,out);
+ wchar_t out[520]={0};int r=__real_browse_folder(frame,out);
  WaitForSingleObject(t,15000);CloseHandle(t);
  check(dlgSeen!=NULL,"folder dialog opened");
  if(!dlgSeen)return;
@@ -498,6 +508,33 @@ static void findChecks(void){
  check(filtered2(home,L".",1,L"",L"",0,2)==2&&order(home,L"report-draft.md|other.bin"),"cloud only: the two files in Beta");
  check(filtered2(home,L"",2,L"",L"",0,2)==1,"the cloud folder itself counts as cloud");
  check(filtered2(home,L"",0,L"",L"",2,2)==0,"the second drive has nothing in the cloud");
+ /* the x in the name field, the reset button, the folder button */
+ {HWND e=GetDlgItem(home,ID_FIND_EDIT),x=GetDlgItem(home,ID_FIND_CLR),rs=GetDlgItem(home,ID_FIND_RESET),pb=GetDlgItem(home,ID_FIND_PBROWSE),pe=GetDlgItem(home,ID_FIND_PATH);
+  RECT re,rx,rr,rp,rpe;wchar_t v[700];
+  check(x&&rs&&pb,"Home has the clear, reset and folder buttons");
+  GetWindowRect(e,&re);GetWindowRect(x,&rx);GetWindowRect(rs,&rr);GetWindowRect(pb,&rp);GetWindowRect(pe,&rpe);
+  check(rx.left>re.left&&rx.right<=re.right&&rx.top>=re.top&&rx.bottom<=re.bottom&&rx.right-rx.left>=12,"the clear button is inside the right end of the name field");
+  check(rp.left>=rpe.right&&rr.left>=rp.right&&rp.right-rp.left>=16&&rr.right-rr.left>=40,"folder field, folder button, reset button from left to right");
+  search(home,L"");check(!shown(x),"nothing typed: no clear button");
+  search(home,L"report");check(shown(x)&&rows(home)==2,"something typed: the clear button shows");
+  SendMessageW(x,BM_CLICK,0,0);
+  GetWindowTextW(e,v,700);check(!v[0]&&!shown(x)&&shown(recent)&&!shown(list),"a click on it empties the field and the search");
+  /* reset: every filter back, the name stays */
+  check(filtered2(home,L"report",1,L"md",L"beta",1,2)==1,"a search with every filter set");
+  SendMessageW(rs,BM_CLICK,0,0);
+  GetWindowTextW(e,v,700);
+  check(!wcscmp(v,L"report")&&SendMessageW(GetDlgItem(home,ID_FIND_DRIVE),CB_GETCURSEL,0,0)==0&&SendMessageW(GetDlgItem(home,ID_FIND_KIND),CB_GETCURSEL,0,0)==0
+        &&SendMessageW(GetDlgItem(home,ID_FIND_CLOUD),CB_GETCURSEL,0,0)==0&&!GetWindowTextLengthW(GetDlgItem(home,ID_FIND_EXT))&&!GetWindowTextLengthW(pe),"reset: all drives, every kind, cloud included, no extension, no folder; the name stays");
+  check(rows(home)==2,"and the search runs again without the filters");
+  /* folder button: the chosen folder becomes the folder filter */
+  search(home,L"");
+  swprintf(fakeFolder,700,L"%ls\\Beta",findRoot);browseCalls=0;
+  SendMessageW(pb,BM_CLICK,0,0);
+  GetWindowTextW(pe,v,700);check(browseCalls==1&&!_wcsicmp(v,fakeFolder),"the folder button puts the chosen folder into the folder filter");
+  check(rows(home)==2&&order(home,L"report-draft.md|other.bin"),"and lists what is inside that folder");
+  fakeFolder[0]=0;cancelFolder=1;browseCalls=0;SendMessageW(pb,BM_CLICK,0,0);cancelFolder=0;
+  GetWindowTextW(pe,v,700);check(browseCalls==1&&wcsstr(v,L"Beta")!=NULL&&rows(home)==2,"a cancelled folder dialog changes nothing");
+  SendMessageW(rs,BM_CLICK,0,0);check(!GetWindowTextLengthW(pe)&&shown(recent),"reset with no name left: back to the recent sessions");}
  /* opening what was found */
  check(filtered(home,L"other",0,L"",L"")==1,"one row to open");
  swprintf(want,900,L"%ls\\Beta\\other.bin",findRoot);
