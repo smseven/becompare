@@ -18,6 +18,8 @@ extern mk, reg_class, scl, tip_add
 extern ini_prepare, open_any_file, g_sess, g_nsess
 extern ShowWindow, SetTimer, KillTimer, InvalidateRect, GetWindowTextW, SetWindowTextW
 extern find_start, find_query2, find_path, fi_state, fi_vis
+extern find_sort, find_time, find_size, find_flags, find_name, find_parent, find_volcount, find_volname
+extern lv_dark_header, fmt_size, FileTimeToLocalFileTime, FileTimeToSystemTime, malloc
 extern ShellExecuteW, CreatePopupMenu, AppendMenuW, TrackPopupMenu, DestroyMenu, ScreenToClient, GetWindowRect
 extern OpenClipboard, EmptyClipboard, SetClipboardData, CloseClipboard, GlobalAlloc, GlobalLock, GlobalUnlock
 extern memcpy, wcslen, CharLowerBuffW, set_status
@@ -38,13 +40,17 @@ global home_register, home_create, ini_path_init, settings_load, recent_add, g_i
 %define ID_FIND_PATH 3015
 %define ID_FIND_LEXT 3016
 %define ID_FIND_LPATH 3017
+%define ID_FIND_DRIVE 3018
+%define ID_FIND_CLOUD 3019
+%define FIND_TIMER2  78                 ; search a moment after the last key
+%define HF_CAP       4000000            ; results kept (and sorted) at most
+%define HF_DIRSORT   50000              ; sorting by folder builds two paths per comparison
 %define FA_OPEN   1                  ; actions on a found item (also the ids of the menu)
 %define FA_OPENAS 2
 %define FA_SHOW   3
 %define FA_BC     4
 %define FA_COPY   5
 %define FIND_TIMER   77
-%define FIND_SHOWN   300                ; results listed at most
 %define BS_OWNERDRAW 0x000B
 %define MAX_RECENT 10
 
@@ -55,6 +61,7 @@ cn_button:  dw __utf16__("BUTTON"), 0
 cn_listbox: dw __utf16__("LISTBOX"), 0
 cn_edit:    dw __utf16__("EDIT"), 0
 cn_combo:   dw __utf16__("COMBOBOX"), 0
+cn_lview:   dw __utf16__("SysListView32"), 0
 s_empty:    dw 0
 
 ; App Header strings
@@ -73,6 +80,31 @@ WSTR s_cue_ext, "pdf;docx"
 WSTR s_lbl_ext, "확장자"
 WSTR s_lbl_path, "폴더"
 WSTR s_cue_path, "폴더 경로에 포함"
+WSTR s_tip_find_drive, "이 드라이브에서만 찾습니다"
+WSTR s_tip_find_cloud, "OneDrive 같은 클라우드 저장소 폴더 안의 항목을 포함할지, 뺄지, 그것만 볼지 고릅니다"
+WSTR s_fd_all, "모든 드라이브"
+WSTR s_fc0, "클라우드 포함"
+WSTR s_fc1, "클라우드 제외"
+WSTR s_fc2, "클라우드만"
+WSTR s_fcol0, "이름"
+WSTR s_fcol1, "수정한 날짜"
+WSTR s_fcol2, "유형"
+WSTR s_fcol3, "크기"
+WSTR s_fcol4, "폴더"
+WSTR f_find_date, "%04d-%02d-%02d %02d:%02d"
+WSTR s_arr_up, " ▲"
+WSTR s_arr_dn, " ▼"
+WSTR f_colhdr, "%s%s"
+WSTR s_ft_dir, "파일 폴더"
+WSTR s_ft_file, "파일"
+WSTR f_ft_ext, "%s 파일"
+WSTR s_kb, "KB"
+WSTR s_find_toomany, "결과가 5만 개를 넘으면 폴더 순으로 정렬하지 않고 이름 순으로 보여 줍니다."
+WSTR f_find_capped, "파일 찾기 결과 %u개 (처음 400만 개만 표시) · 색인 %llu개"
+align 8
+fcol_text: dq s_fcol0, s_fcol1, s_fcol2, s_fcol3, s_fcol4
+fcol_w:    dd 300, 140, 90, 90, 440
+fcol_fmt:  dd 0, 0, 0, 1, 0                  ; the size column is right aligned
 WSTR s_fk0, "전체"
 WSTR s_fk1, "파일만"
 WSTR s_fk2, "폴더만"
@@ -199,6 +231,14 @@ badge_bg_light:
 section .bss
 alignb 8
 g_ini: resw 520
+alignb 8
+hf_ids:  resq 1                     ; ids of the search results, in the order shown
+hf_n:    resq 1
+hf_key:  resq 1                     ; sort column: 0 name, 1 date, 2 type, 3 size, 4 folder
+hf_desc: resq 1
+hf_init: resq 1
+hf_text: resw 1104                  ; text of the cell being drawn
+hf_tmp:  resw 1104
 
 section .text
 
@@ -482,21 +522,41 @@ home_layout:
     call scl
     add ebp, eax                     ; y of the file search row = bottom of buttons + scl(22)
 
-    ; 6b. File search row: [ name .......... ][ kind ][ extensions ][ folder ][ button ], placed from the right
+    ; 6b. File search: [ name ............................ ][ button ]
+    ;                  [ drive ][ kind ][ cloud ] ext [....] folder [..........]
     movsxd rbp, ebp
     mov ecx, 26
     call scl
-    mov [rsp+240], rax               ; row height (slots 224 .. 248 are used by this row only)
+    mov [rsp+240], rax               ; row height (slots 216 .. 248 are used by these rows only)
     mov eax, r12d
     add eax, [rsp+128]
-    mov [rsp+232], rax               ; right edge, then the x of each control
-%macro FPLACE 2-3                    ; control id, width [, height: a combo box takes the height of its list]
+    mov [rsp+216], rax               ; right edge
+    mov ecx, 96
+    call scl
+    mov edi, eax                     ; button width
+    mov rax, [rsp+216]
+    sub eax, edi
+    mov [rsp+232], rax
+    invoke GetDlgItem, rsi, ID_FIND_BTN
+    mov [rsp+248], rax
+    invoke MoveWindow, [rsp+248], [rsp+232], rbp, rdi, [rsp+240], 1
+    mov ecx, 8
+    call scl
+    mov rdi, [rsp+232]
+    sub edi, eax
+    sub edi, r12d                    ; the name field takes what is left
+    invoke GetDlgItem, rsi, ID_FIND_EDIT
+    mov [rsp+248], rax
+    invoke MoveWindow, [rsp+248], r12, rbp, rdi, [rsp+240], 1
+    mov ecx, 32
+    call scl
+    add ebp, eax                     ; second row
+    mov eax, r12d
+    mov [rsp+232], rax               ; x of the next control
+%macro FLEFT 2-3                     ; control id, width [, height: a combo box takes the height of its list]
     mov ecx, %2
     call scl
     mov edi, eax
-    mov rax, [rsp+232]
-    sub eax, edi
-    mov [rsp+232], rax
     invoke GetDlgItem, rsi, %1
     mov [rsp+248], rax
   %if %0 == 3
@@ -509,19 +569,24 @@ home_layout:
   %endif
     mov ecx, 8
     call scl
-    sub qword [rsp+232], rax         ; gap
+    add eax, edi
+    add qword [rsp+232], rax         ; width + gap
 %endmacro
-    FPLACE ID_FIND_BTN, 96
-    FPLACE ID_FIND_PATH, 150
-    FPLACE ID_FIND_LPATH, 30
-    FPLACE ID_FIND_EXT, 110
-    FPLACE ID_FIND_LEXT, 44
-    FPLACE ID_FIND_KIND, 120, 300
-    mov rdi, [rsp+232]
-    sub edi, r12d                    ; the name field takes what is left
-    invoke GetDlgItem, rsi, ID_FIND_EDIT
+    FLEFT ID_FIND_DRIVE, 130, 300
+    FLEFT ID_FIND_KIND, 120, 300
+    FLEFT ID_FIND_CLOUD, 130, 200
+    FLEFT ID_FIND_LEXT, 44
+    FLEFT ID_FIND_EXT, 120
+    FLEFT ID_FIND_LPATH, 30
+    mov rdi, [rsp+216]
+    sub rdi, [rsp+232]               ; the folder field takes what is left
+    cmp edi, 40
+    jge .fpw
+    mov edi, 40
+.fpw:
+    invoke GetDlgItem, rsi, ID_FIND_PATH
     mov [rsp+248], rax
-    invoke MoveWindow, [rsp+248], r12, rbp, rdi, [rsp+240], 1
+    invoke MoveWindow, [rsp+248], [rsp+232], rbp, rdi, [rsp+240], 1
     mov ecx, 40
     call scl
     add ebp, eax                     ; rlabel_y
@@ -608,6 +673,8 @@ home_proc:
     je .timer
     cmp edi, WM_CONTEXTMENU
     je .ctxmenu
+    cmp edi, WM_NOTIFY
+    je .notify
     cmp edi, BC_THEME
     je .theme
     cmp edi, WM_APP+30
@@ -679,8 +746,54 @@ home_proc:
     mov rbx, rax
     invoke SendMessageW, rbx, 0x1501, 1, &s_cue_path
     invoke tip_add, rbx, &s_tip_find_path
-    invoke mk, rsi, &cn_listbox, &s_empty, LBS_NOTIFY|WS_VSCROLL|WS_BORDER|WS_TABSTOP|0x50, ID_FIND_LIST
-    invoke ShowWindow, rax, 0
+    invoke mk, rsi, &cn_combo, &s_empty, 3|WS_VSCROLL|WS_TABSTOP, ID_FIND_DRIVE
+    mov rbx, rax
+    invoke SendMessageW, rbx, 0x0143, 0, &s_fd_all
+    invoke SendMessageW, rbx, 0x014E, 0, 0
+    invoke tip_add, rbx, &s_tip_find_drive
+    invoke mk, rsi, &cn_combo, &s_empty, 3|WS_VSCROLL|WS_TABSTOP, ID_FIND_CLOUD
+    mov rbx, rax
+    invoke SendMessageW, rbx, 0x0143, 0, &s_fc0
+    invoke SendMessageW, rbx, 0x0143, 0, &s_fc1
+    invoke SendMessageW, rbx, 0x0143, 0, &s_fc2
+    invoke SendMessageW, rbx, 0x014E, 0, 0
+    invoke tip_add, rbx, &s_tip_find_cloud
+    ; results: a details list like Explorer's; a click on a column header sorts by it
+    invoke mk, rsi, &cn_lview, 0, LVS_REPORT|LVS_OWNERDATA|LVS_SHOWSELALWAYS|0x0004|WS_TABSTOP|WS_BORDER, ID_FIND_LIST   ; single selection
+    mov rbx, rax
+    invoke ShowWindow, rbx, 0
+    invoke SendMessageW, rbx, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT|LVS_EX_DOUBLEBUFFER
+    invoke lv_dark_header, rbx
+    xor r14d, r14d
+.fcol:
+    xor eax, eax
+    mov [rsp+96], rax
+    mov [rsp+104], rax
+    mov [rsp+112], rax
+    mov [rsp+120], rax
+    mov [rsp+128], rax
+    mov dword [rsp+96], LVCF_FMT|LVCF_WIDTH|LVCF_TEXT
+    lea rax, [fcol_fmt]
+    mov eax, [rax+r14*4]
+    mov [rsp+100], eax
+    lea rax, [fcol_w]
+    mov ecx, [rax+r14*4]
+    call scl
+    mov [rsp+104], eax
+    lea rax, [fcol_text]
+    mov rax, [rax+r14*8]
+    mov [rsp+112], rax
+    invoke SendMessageW, rbx, LVM_INSERTCOLUMNW, r14, &rsp+96
+    inc r14d
+    cmp r14d, 5
+    jb .fcol
+    cmp qword [hf_init], 0
+    jne .fsorted
+    mov qword [hf_init], 1
+    mov qword [hf_key], 1            ; newest first
+    mov qword [hf_desc], 1
+.fsorted:
+    invoke home_find_theme, rsi
     invoke fill_recent, rsi
     xor eax, eax
     EPILOG 192
@@ -710,8 +823,10 @@ home_proc:
     je .find_edit
     cmp eax, ID_FIND_KIND
     je .find_kind
-    cmp eax, ID_FIND_LIST
-    je .find_list
+    cmp eax, ID_FIND_DRIVE
+    je .find_kind
+    cmp eax, ID_FIND_CLOUD
+    je .find_kind
     cmp eax, ID_RDEL
     je .rdel
     cmp eax, ID_RECENT
@@ -762,6 +877,7 @@ home_proc:
     EPILOG 192
 
 .theme:
+    invoke home_find_theme, rsi
     invoke RedrawWindow, rsi, 0, 0, 0x0585
     xor eax, eax
     EPILOG 192
@@ -799,33 +915,60 @@ home_proc:
 .find_edit:
     mov rax, r12
     shr eax, 16
-    cmp eax, 0x0300                   ; EN_CHANGE: search as the text is typed
+    cmp eax, 0x0300                   ; EN_CHANGE: search a moment after the last key
     jne .def
+    invoke SetTimer, rsi, FIND_TIMER2, 250, 0
+    xor eax, eax
+    EPILOG 192
 .find:
+    invoke KillTimer, rsi, FIND_TIMER2
     invoke home_find, rsi
     xor eax, eax
     EPILOG 192
 .timer:
+    cmp r12, FIND_TIMER2
+    je .find
     cmp r12, FIND_TIMER               ; while the drives are being listed the results are refreshed
     jne .def
     invoke home_find, rsi
     xor eax, eax
     EPILOG 192
-.find_list:
-    mov rax, r12
-    shr eax, 16
-    cmp eax, LBN_DBLCLK               ; a found item opens with the program registered for it
+.notify:
+    mov rax, [r13+NMH_ID]
+    cmp eax, ID_FIND_LIST
     jne .def
-    lea rdi, [rsp+96]
-    mov word [rdi], 0
-    invoke GetDlgItem, rsi, ID_FIND_LIST
-    mov rbx, rax
-    invoke SendMessageW, rbx, LB_GETCURSEL, 0, 0
-    movsxd rax, eax
-    test rax, rax
+    mov eax, [r13+NMH_CODE]
+    cmp eax, LVN_GETDISPINFOW
+    je .n_disp
+    cmp eax, LVN_COLUMNCLICK
+    je .n_col
+    cmp eax, NM_DBLCLK
+    je .n_open
+    cmp eax, -4                       ; NM_RETURN
+    je .n_enter
+    jmp .def
+.n_disp:
+    invoke home_find_disp, r13
+    xor eax, eax
+    EPILOG 192
+.n_col:
+    mov ebx, [r13+28]                 ; NMLISTVIEW.iSubItem
+    invoke home_find_col, rsi, rbx
+    xor eax, eax
+    EPILOG 192
+.n_open:
+    movsxd rbx, dword [r13+24]        ; NMITEMACTIVATE.iItem
+    test rbx, rbx
     js .none
-    mov r14, rax
-    invoke home_find_act, rbx, r14, FA_OPEN
+    invoke home_find_act, rbx, FA_OPEN
+    xor eax, eax
+    EPILOG 192
+.n_enter:
+    invoke SendMessageW, [r13+NMH_FROM], LVM_GETNEXTITEM, -1, 2      ; LVNI_SELECTED
+    movsxd rbx, eax
+    test rbx, rbx
+    js .none
+    invoke home_find_act, rbx, FA_OPEN
     xor eax, eax
     EPILOG 192
 
@@ -841,20 +984,70 @@ home_proc:
     EPILOG 192
 
 ; ---------------------------------------------------------------- file search
-; home_find(hwnd): search for the text of the field, narrowed by the filters, and list what was found.
+; home_find_theme(hwnd): colours of the result list
+home_find_theme:
+    PROLOG 64
+    invoke GetDlgItem, rcx, ID_FIND_LIST
+    test rax, rax
+    jz .d
+    mov rbx, rax
+    invoke SendMessageW, rbx, LVM_SETBKCOLOR, 0, #[th_bg]
+    invoke SendMessageW, rbx, LVM_SETTEXTBKCOLOR, 0, #[th_bg]
+    invoke SendMessageW, rbx, LVM_SETTEXTCOLOR, 0, #[th_fg]
+.d:
+    EPILOG 64
+
+; home_find_drives(hwnd): the drive filter lists "all" and every listed tree; filled in as they appear
+home_find_drives:
+    PROLOG 1296
+    invoke GetDlgItem, rcx, ID_FIND_DRIVE
+    mov rbx, rax
+    call find_volcount
+    mov r12d, eax
+    invoke SendMessageW, rbx, 0x0146, 0, 0            ; CB_GETCOUNT
+    lea ecx, [r12+1]
+    cmp eax, ecx
+    je .d
+    invoke SendMessageW, rbx, 0x0147, 0, 0            ; CB_GETCURSEL
+    movsxd r13, eax
+    invoke SendMessageW, rbx, 0x014B, 0, 0            ; CB_RESETCONTENT
+    invoke SendMessageW, rbx, 0x0143, 0, &s_fd_all
+    xor r14d, r14d
+.l:
+    cmp r14d, r12d
+    jae .sel
+    invoke find_volname, r14, &rsp+96, 590
+    invoke SendMessageW, rbx, 0x0143, 0, &rsp+96
+    inc r14d
+    jmp .l
+.sel:
+    test r13, r13
+    jns .s
+    xor r13d, r13d
+.s:
+    invoke SendMessageW, rbx, 0x014E, r13, 0          ; CB_SETCURSEL
+.d:
+    EPILOG 1296
+
+; home_find(hwnd): search for the text of the field, narrowed by the filters, sort and list what was found.
 ;   With the name and every filter empty the recent sessions are shown again. The first search starts
 ;   listing the drives; while that runs, a timer repeats the search so that the list fills up.
 %define HF_TXT  96                   ; wchar[200] -> 496
-%define HF_IDS  496                  ; dd[FIND_SHOWN] -> 1696
-%define HF_PATH 1696                 ; wchar[800] -> 3296
-%define HF_LBL  3296                 ; wchar[100] -> 3496
-%define HF_ST   3504                 ; state of the listing before the search
-%define HF_EXT  3512                 ; wchar[100]: extensions typed, turned into a list -> 3712
-%define HF_PTX  3712                 ; wchar[120]: folder filter -> 3952
-%define HF_FLT  3952                 ; filter for find_query2 (24) -> 3976
+%define HF_LBL  496                  ; wchar[100] -> 696
+%define HF_ST   696                  ; state of the listing before the search
+%define HF_EXT  704                  ; wchar[100]: extensions typed, turned into a list -> 904
+%define HF_PTX  904                  ; wchar[120]: folder filter -> 1144
+%define HF_FLT  1144                 ; filter for find_query2 (32) -> 1176
 home_find:
-    PROLOG 4000
+    PROLOG 1184
     mov rsi, rcx
+    cmp qword [hf_ids], 0
+    jne .have
+    invoke malloc, HF_CAP*4
+    test rax, rax
+    jz .ret
+    mov [hf_ids], rax
+.have:
     invoke GetDlgItem, rsi, ID_FIND_EDIT
     invoke GetWindowTextW, rax, &rsp+HF_TXT, 199
     invoke GetDlgItem, rsi, ID_FIND_EXT
@@ -876,6 +1069,20 @@ home_find:
     mov [rsp+HF_FLT+8], rcx          ; extensions of the kind
     lea rax, [rsp+HF_PTX]
     mov [rsp+HF_FLT+16], rax
+    invoke GetDlgItem, rsi, ID_FIND_DRIVE
+    invoke SendMessageW, rax, 0x0147, 0, 0
+    test eax, eax
+    jns .drv
+    xor eax, eax
+.drv:
+    mov [rsp+HF_FLT+24], eax         ; drive: 0 all, n = the n-th listed tree
+    invoke GetDlgItem, rsi, ID_FIND_CLOUD
+    invoke SendMessageW, rax, 0x0147, 0, 0
+    cmp eax, 2
+    jbe .cld
+    xor eax, eax
+.cld:
+    mov [rsp+HF_FLT+28], eax         ; cloud storage: 0 included, 1 left out, 2 only
     ; extensions typed: "pdf; *.docx , .txt" -> "pdf" "docx" "txt" "" (in place, never longer than the text)
     lea rdi, [rsp+HF_EXT]
     xor ecx, ecx                     ; read
@@ -939,50 +1146,45 @@ home_find:
     or eax, ecx
     or rax, [rsp+HF_FLT]
     or rax, [rsp+HF_FLT+8]
+    or rax, [rsp+HF_FLT+24]
     jnz .q
     invoke KillTimer, rsi, FIND_TIMER
+    mov qword [hf_n], 0
+    invoke SendMessageW, r12, LVM_SETITEMCOUNT, 0, 0
     invoke ShowWindow, r12, 0
     invoke ShowWindow, r13, 5
     invoke GetDlgItem, rsi, ID_RDEL
     invoke ShowWindow, rax, 5
     invoke GetDlgItem, rsi, ID_RLABEL
     invoke SetWindowTextW, rax, &s_rlabel
-    EPILOG 4000
+    EPILOG 1184
 .q:
     call find_start
     ; the state from before the search decides whether to search again: a listing that ends while this
     ; search runs would otherwise leave results of a half-filled index on the screen
     mov rax, [fi_state]
     mov [rsp+HF_ST], rax
-    invoke find_query2, &rsp+HF_TXT, &rsp+HF_IDS, FIND_SHOWN, &rsp+HF_FLT
+    invoke find_query2, &rsp+HF_TXT, [hf_ids], HF_CAP, &rsp+HF_FLT
     mov r14d, eax                    ; names found
     mov r15d, eax
-    cmp r15d, FIND_SHOWN
+    cmp r15d, HF_CAP
     jbe .c
-    mov r15d, FIND_SHOWN
+    mov r15d, HF_CAP
 .c:
-    invoke SendMessageW, r12, WM_SETREDRAW, 0, 0
-    invoke SendMessageW, r12, LB_RESETCONTENT, 0, 0
-    xor ebx, ebx
-.l:
-    cmp ebx, r15d
-    jae .ld
-    mov edi, [rsp+HF_IDS+rbx*4]
-    invoke find_path, rdi, &rsp+HF_PATH, 790
-    test eax, eax
-    jz .ln
-    invoke SendMessageW, r12, LB_ADDSTRING, 0, &rsp+HF_PATH
-.ln:
-    inc ebx
-    jmp .l
-.ld:
-    invoke SendMessageW, r12, WM_SETREDRAW, 1, 0
+    mov [hf_n], r15
+    invoke home_find_resort, rsi
+    invoke SendMessageW, r12, LVM_SETITEMCOUNT, r15, 0
     invoke InvalidateRect, r12, 0, 1
     invoke ShowWindow, r13, 0
     invoke ShowWindow, r12, 5
     invoke GetDlgItem, rsi, ID_RDEL                  ; "clear history" belongs to the recent sessions
     invoke ShowWindow, rax, 0
+    invoke home_find_drives, rsi
     lea rdi, [f_find_ready]
+    cmp r14d, HF_CAP
+    jbe .rdy
+    lea rdi, [f_find_capped]
+.rdy:
     cmp qword [rsp+HF_ST], 2
     je .lb
     lea rdi, [f_find_busy]
@@ -994,12 +1196,191 @@ home_find:
     cmp qword [rsp+HF_ST], 2
     je .kill
     invoke SetTimer, rsi, FIND_TIMER, 700, 0
-    EPILOG 4000
+    EPILOG 1184
 .kill:
     invoke KillTimer, rsi, FIND_TIMER
-    EPILOG 4000
+.ret:
+    EPILOG 1184
 
-; home_find_act(list, index, action): do something with the found item of that row
+; home_find_resort(hwnd): put the results in the order of the sort column and mark that column's header
+%define HR_HD   80                   ; HDITEMW (72) -> 152
+%define HR_TX   160                  ; wchar[44]: header text with its arrow -> 248
+home_find_resort:
+    PROLOG 256
+    mov rsi, rcx
+    mov r12, [hf_key]
+    cmp r12, 4
+    jne .s
+    cmp qword [hf_n], HF_DIRSORT
+    jbe .s
+    invoke set_status, &s_find_toomany
+    xor r12d, r12d
+.s:
+    invoke find_sort, [hf_ids], [hf_n], r12, [hf_desc]
+    invoke GetDlgItem, rsi, ID_FIND_LIST
+    mov r13, rax
+    invoke InvalidateRect, r13, 0, 1
+    invoke SendMessageW, r13, 0x101F, 0, 0            ; LVM_GETHEADER
+    test rax, rax
+    jz .d
+    mov r14, rax
+    xor ebx, ebx
+.h:
+    cmp ebx, 5
+    jae .d
+    xor eax, eax
+    mov ecx, 9
+    lea rdi, [rsp+HR_HD]
+.z:
+    mov [rdi], rax
+    add rdi, 8
+    dec ecx
+    jnz .z
+    mov dword [rsp+HR_HD], 4         ; HDI_FORMAT
+    invoke SendMessageW, r14, 0x120B, rbx, &rsp+HR_HD  ; HDM_GETITEMW
+    mov eax, [rsp+HR_HD+28]
+    and eax, ~0x600                  ; neither arrow
+    cmp rbx, [hf_key]
+    jne .w
+    or eax, 0x400                    ; HDF_SORTUP
+    cmp qword [hf_desc], 0
+    je .w
+    xor eax, 0x600                   ; HDF_SORTDOWN
+.w:
+    mov [rsp+HR_HD+28], eax
+    ; the arrow is also written into the header text: the themed header does not draw the sort mark
+    lea rax, [fcol_text]
+    mov r15, [rax+rbx*8]
+    lea r12, [s_empty]
+    cmp rbx, [hf_key]
+    jne .t
+    lea r12, [s_arr_up]
+    cmp qword [hf_desc], 0
+    je .t
+    lea r12, [s_arr_dn]
+.t:
+    invoke _snwprintf, &rsp+HR_TX, 40, &f_colhdr, r15, r12
+    lea rax, [rsp+HR_TX]
+    mov [rsp+HR_HD+8], rax
+    mov dword [rsp+HR_HD], 6         ; HDI_TEXT | HDI_FORMAT
+    invoke SendMessageW, r14, 0x120C, rbx, &rsp+HR_HD  ; HDM_SETITEMW
+    inc ebx
+    jmp .h
+.d:
+    EPILOG 256
+
+; home_find_col(hwnd, column): a click on a column header - sort by it; a second click turns the order.
+;   Dates and sizes start with the largest, names, types and folders with A.
+home_find_col:
+    PROLOG 64
+    mov rsi, rcx
+    mov ebx, edx
+    cmp ebx, 4
+    ja .d
+    cmp rbx, [hf_key]
+    jne .new
+    xor qword [hf_desc], 1
+    jmp .go
+.new:
+    mov [hf_key], rbx
+    mov qword [hf_desc], 0
+    cmp ebx, 1
+    je .dn
+    cmp ebx, 3
+    jne .go
+.dn:
+    mov qword [hf_desc], 1
+.go:
+    invoke home_find_resort, rsi
+.d:
+    EPILOG 64
+
+; home_find_disp(NMLVDISPINFOW*): text of one cell of the result list
+home_find_disp:
+    PROLOG 160
+    mov rbx, rcx
+    test dword [rbx+DI_MASK], LVIF_TEXT
+    jz .d
+    mov eax, [rbx+DI_ITEM]
+    cmp rax, [hf_n]
+    jae .d
+    mov rcx, [hf_ids]
+    mov esi, [rcx+rax*4]             ; id
+    lea rdi, [hf_text]
+    mov word [rdi], 0
+    mov eax, [rbx+DI_SUB]
+    cmp eax, 1
+    je .date
+    cmp eax, 2
+    je .type
+    cmp eax, 3
+    je .size
+    cmp eax, 4
+    je .dir
+    invoke find_name, rsi, rdi, 1000
+    jmp .set
+.date:
+    invoke find_time, rsi
+    test rax, rax
+    jz .set
+    mov [rsp+96], rax
+    invoke FileTimeToLocalFileTime, &rsp+96, &rsp+104
+    invoke FileTimeToSystemTime, &rsp+104, &rsp+112
+    movzx r12d, word [rsp+112]       ; year
+    movzx r13d, word [rsp+114]       ; month
+    movzx r14d, word [rsp+118]       ; day
+    movzx r15d, word [rsp+120]       ; hour
+    movzx ebp, word [rsp+122]        ; minute
+    invoke _snwprintf, rdi, 40, &f_find_date, r12, r13, r14, r15, rbp
+    jmp .set
+.type:
+    invoke find_flags, rsi
+    test eax, 1
+    jz .tf
+    lea rdi, [s_ft_dir]
+    jmp .set
+.tf:
+    invoke find_name, rsi, &hf_tmp, 1000
+    mov ecx, eax
+    lea r8, [hf_tmp]
+.td:
+    test ecx, ecx
+    jz .tn
+    dec ecx
+    cmp word [r8+rcx*2], '.'
+    jne .td
+    lea r12, [r8+rcx*2+2]
+    cmp word [r12], 0
+    je .tn
+    invoke _snwprintf, rdi, 200, &f_ft_ext, r12
+    jmp .set
+.tn:
+    lea rdi, [s_ft_file]
+    jmp .set
+.size:
+    invoke find_flags, rsi
+    test eax, 1
+    jnz .set                         ; folders show no size
+    invoke find_time, rsi
+    test rax, rax
+    jz .set                          ; listed without sizes
+    invoke find_size, rsi
+    add rax, 1023
+    shr rax, 10
+    mov r12, rax
+    invoke fmt_size, rdi, r12
+    invoke wcscat, rdi, &s_kb
+    jmp .set
+.dir:
+    invoke find_parent, rsi
+    mov r12d, eax
+    invoke find_path, r12, rdi, 1090
+.set:
+    mov [rbx+DI_TEXT], rdi
+.d:
+    EPILOG 160
+
+; home_find_act(row, action): do something with the found item of that row
 ;   FA_OPEN   open it with the program registered for its type (a folder opens in Explorer); when
 ;             there is none, ask which program to use
 ;   FA_OPENAS ask which program to use
@@ -1010,16 +1391,16 @@ home_find:
 %define FA_ARG  1696                 ; wchar[800] -> 3296
 home_find_act:
     PROLOG 3312
-    mov rbx, rcx
-    mov rsi, rdx
-    mov r12d, r8d
-    invoke SendMessageW, rbx, 0x018A, rsi, 0          ; LB_GETTEXTLEN
-    cmp eax, 780
+    mov rsi, rcx
+    mov r12d, edx
+    cmp rsi, [hf_n]
     jae .d
+    mov rax, [hf_ids]
+    mov ebx, [rax+rsi*4]
+    invoke find_path, rbx, &rsp+FA_PATH, 790
     test eax, eax
-    jle .d
+    jz .d
     mov r13d, eax
-    invoke SendMessageW, rbx, LB_GETTEXT, rsi, &rsp+FA_PATH
     cmp r12d, FA_OPENAS
     je .openas
     cmp r12d, FA_SHOW
@@ -1093,11 +1474,12 @@ home_find_act:
 .d:
     EPILOG 3312
 
-; home_find_menu(hwnd, list, lparam of WM_CONTEXTMENU): menu of actions for the item under the pointer
+; home_find_menu(hwnd, list, lparam of WM_CONTEXTMENU): menu of actions for the row under the pointer
 %define FN_PT   96                   ; POINT (screen), then RECT for the keyboard case -> 112
-%define FN_CL   112                  ; POINT (client)
+%define FN_HT   112                  ; LVHITTESTINFO (24) -> 136
+%define FN_IT   136                  ; LVITEMW up to stateMask (24) -> 160
 home_find_menu:
-    PROLOG 160
+    PROLOG 176
     mov rsi, rcx
     mov rbx, rdx
     mov r12, r8
@@ -1109,25 +1491,28 @@ home_find_menu:
     shr eax, 16
     movsx eax, ax
     mov [rsp+FN_PT+4], eax
+    xor eax, eax
+    mov [rsp+FN_HT+8], rax
+    mov [rsp+FN_HT+16], rax
     mov rax, [rsp+FN_PT]
-    mov [rsp+FN_CL], rax
-    invoke ScreenToClient, rbx, &rsp+FN_CL
-    mov eax, [rsp+FN_CL+4]
-    shl eax, 16
-    mov ecx, [rsp+FN_CL]
-    and ecx, 0xFFFF
-    or eax, ecx
-    mov r13d, eax
-    invoke SendMessageW, rbx, 0x01A9, 0, r13          ; LB_ITEMFROMPOINT
-    test eax, 0x10000                 ; outside the rows
-    jnz .cur
-    movzx r13d, ax
-    invoke SendMessageW, rbx, 0x0186, r13, 0          ; LB_SETCURSEL
+    mov [rsp+FN_HT], rax
+    invoke ScreenToClient, rbx, &rsp+FN_HT
+    invoke SendMessageW, rbx, 0x1012, 0, &rsp+FN_HT   ; LVM_HITTEST
+    movsxd r13, eax
+    test r13, r13
+    js .cur
+    xor eax, eax
+    mov [rsp+FN_IT], rax
+    mov [rsp+FN_IT+8], rax
+    mov [rsp+FN_IT+16], rax
+    mov dword [rsp+FN_IT+12], 3      ; state: selected and focused
+    mov dword [rsp+FN_IT+16], 3
+    invoke SendMessageW, rbx, 0x102B, r13, &rsp+FN_IT  ; LVM_SETITEMSTATE
     jmp .cur
 .key:
     invoke GetWindowRect, rbx, &rsp+FN_PT             ; the menu key: at the top left of the list
 .cur:
-    invoke SendMessageW, rbx, LB_GETCURSEL, 0, 0
+    invoke SendMessageW, rbx, LVM_GETNEXTITEM, -1, 2  ; LVNI_SELECTED
     movsxd r14, eax
     test r14, r14
     js .d
@@ -1146,9 +1531,9 @@ home_find_menu:
     invoke DestroyMenu, r15
     test r13d, r13d
     jz .d
-    invoke home_find_act, rbx, r14, r13
+    invoke home_find_act, r14, r13
 .d:
-    EPILOG 160
+    EPILOG 176
 
 ; home_find_open(list, index): open the found file of that row
 home_find_open:

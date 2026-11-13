@@ -5,8 +5,9 @@
    "test_ui fmerge" runs a folder merge into an output folder and checks what it reports and writes.
    "test_ui browse" opens the folder dialog from a window hanging off the screen and checks where it lands.
    "test_ui find" searches a small folder tree through the file search of the Home tab.
-   "test_ui findmft" lists the whole drive of the working folder from its file table (needs administrator
-   rights, skipped otherwise) and looks for a file created just before.
+   "test_ui findmft" lists the whole drive of the working folder by parsing its file table (needs administrator
+   rights, skipped otherwise) and looks for a file created just before; "test_ui findusn" does the same with the
+   file table enumerated instead (names only).
    Every mode also checks the buttons at the right end of the tab row and that each control has a tooltip.
    WinMain of main.asm is linked as bc_winmain. Set BC_UITEST_SHOW=1 to watch the window. */
 #include <windows.h>
@@ -25,6 +26,8 @@ extern uint64_t fi_state, fi_vis, fi_mode;
 extern int find_query(const wchar_t*,uint32_t*,uint32_t);
 extern int find_query2(const wchar_t*,uint32_t*,uint32_t,const void*);
 extern int find_path(uint32_t,wchar_t*,uint32_t);
+extern uint64_t find_time(uint32_t),find_size(uint32_t);
+extern uint64_t fi_ncloud;
 extern uint32_t th_lonly, th_ronly, th_conf;
 
 #define ID_RA 201
@@ -47,10 +50,12 @@ extern uint32_t th_lonly, th_ronly, th_conf;
 #define ID_FIND_KIND 3013
 #define ID_FIND_EXT 3014
 #define ID_FIND_PATH 3015
+#define ID_FIND_DRIVE 3018
+#define ID_FIND_CLOUD 3019
 #define IDM_LIGHT 1030
 #define IDM_DARK 1031
 
-static int checks, failed, shiftDown, boxes, mergeMode, fmergeMode, browseMode, findMode, mftMode, expectBoxes, shownBoxes;
+static int checks, failed, shiftDown, boxes, mergeMode, fmergeMode, browseMode, findMode, mftMode, usnMode, expectBoxes, shownBoxes;
 static wchar_t findRoot[600], probeName[80], probePath[700];
 static wchar_t lastBox[400];
 static DWORD mainTid;
@@ -336,64 +341,129 @@ static void browseChecks(void){
 /* ---- file search of the Home tab */
 static HWND homeView(void){return FindWindowExW(frame,NULL,L"BCHome",NULL);}
 static int shown(HWND h){return (GetWindowLongPtrW(h,GWL_STYLE)&WS_VISIBLE)!=0;}
-/* name, kind (row of the combo box), extensions, folder text -> number of rows */
-static int filtered(HWND home,const wchar_t*text,int kind,const wchar_t*ext,const wchar_t*folder){
+static int rows(HWND home){return (int)SendMessageW(GetDlgItem(home,ID_FIND_LIST),LVM_GETITEMCOUNT,0,0);}
+/* name, kind (row of the combo box), extensions, folder text, drive (row of its combo box), cloud choice -> rows */
+static int filtered2(HWND home,const wchar_t*text,int kind,const wchar_t*ext,const wchar_t*folder,int drive,int cloud){
  SendMessageW(GetDlgItem(home,ID_FIND_KIND),CB_SETCURSEL,kind,0);
+ SendMessageW(GetDlgItem(home,ID_FIND_DRIVE),CB_SETCURSEL,drive,0);
+ SendMessageW(GetDlgItem(home,ID_FIND_CLOUD),CB_SETCURSEL,cloud,0);
  SetWindowTextW(GetDlgItem(home,ID_FIND_EXT),ext);SetWindowTextW(GetDlgItem(home,ID_FIND_PATH),folder);
  SetWindowTextW(GetDlgItem(home,ID_FIND_EDIT),text);
  SendMessageW(GetDlgItem(home,ID_FIND_BTN),BM_CLICK,0,0);
- return (int)SendMessageW(GetDlgItem(home,ID_FIND_LIST),LB_GETCOUNT,0,0);
+ return rows(home);
 }
-static int search(HWND home,const wchar_t*text){        /* type, press the button, return the number of rows */
- SetWindowTextW(GetDlgItem(home,ID_FIND_EDIT),text);
- SendMessageW(GetDlgItem(home,ID_FIND_BTN),BM_CLICK,0,0);
- return (int)SendMessageW(GetDlgItem(home,ID_FIND_LIST),LB_GETCOUNT,0,0);
+/* the checks written for one tree keep to the first tree */
+static int filtered(HWND home,const wchar_t*text,int kind,const wchar_t*ext,const wchar_t*folder){return filtered2(home,text,kind,ext,folder,1,0);}
+static int search(HWND home,const wchar_t*text){        /* every filter off: type, press the button, count the rows */
+ return filtered2(home,text,0,L"",L"",0,0);
+}
+static void cell(HWND home,int row,int col,wchar_t*out,int cap){
+ LVITEMW it;memset(&it,0,sizeof it);it.iSubItem=col;it.pszText=out;it.cchTextMax=cap;out[0]=0;
+ SendMessageW(GetDlgItem(home,ID_FIND_LIST),LVM_GETITEMTEXTW,row,(LPARAM)&it);
+}
+static void rowPath(HWND home,int row,wchar_t*out){       /* folder column + name column */
+ wchar_t n[1100];cell(home,row,4,out,1100);cell(home,row,0,n,1100);wcscat(out,L"\\");wcscat(out,n);
 }
 static int rowIs(HWND home,int i,const wchar_t*want){
- wchar_t t[1200]={0};HWND l=GetDlgItem(home,ID_FIND_LIST);
- if(SendMessageW(l,LB_GETTEXTLEN,i,0)>1100)return 0;
- SendMessageW(l,LB_GETTEXT,i,(LPARAM)t);
+ wchar_t t[2300];rowPath(home,i,t);
  if(_wcsicmp(t,want))printf("row %d is another path (%d characters)\n",i,(int)wcslen(t));
  return !_wcsicmp(t,want);
 }
 static int hasRow(HWND home,const wchar_t*want){
- HWND l=GetDlgItem(home,ID_FIND_LIST);int n=(int)SendMessageW(l,LB_GETCOUNT,0,0);wchar_t t[1200];
- for(int i=0;i<n;i++){if(SendMessageW(l,LB_GETTEXTLEN,i,0)>1100)continue;SendMessageW(l,LB_GETTEXT,i,(LPARAM)t);if(!_wcsicmp(t,want))return 1;}
+ int n=rows(home);wchar_t t[2300];
+ for(int i=0;i<n;i++){rowPath(home,i,t);if(!_wcsicmp(t,want))return 1;}
  return 0;
 }
+/* the names of the rows from the top, joined with '|' */
+static int order(HWND home,const wchar_t*want){
+ wchar_t got[3000]=L"",n[1100];int c=rows(home);
+ for(int i=0;i<c&&i<20;i++){cell(home,i,0,n,1100);if(i)wcscat(got,L"|");wcscat(got,n);}
+ if(wcscmp(got,want)){
+  char a[600];WideCharToMultiByte(CP_UTF8,0,got,-1,a,600,NULL,NULL);printf("order is %s\n",a);
+ }
+ return !wcscmp(got,want);
+}
+static void selectRow(HWND list,int row){LVITEMW it;memset(&it,0,sizeof it);it.state=it.stateMask=LVIS_SELECTED|LVIS_FOCUSED;SendMessageW(list,LVM_SETITEMSTATE,row,(LPARAM)&it);}
+static void clickColumn(HWND home,int col){
+ NMLISTVIEW nm;memset(&nm,0,sizeof nm);nm.hdr.hwndFrom=GetDlgItem(home,ID_FIND_LIST);nm.hdr.idFrom=ID_FIND_LIST;nm.hdr.code=LVN_COLUMNCLICK;nm.iItem=-1;nm.iSubItem=col;
+ SendMessageW(home,WM_NOTIFY,ID_FIND_LIST,(LPARAM)&nm);
+}
+static void doubleClick(HWND home,int row){
+ NMITEMACTIVATE nm;memset(&nm,0,sizeof nm);nm.hdr.hwndFrom=GetDlgItem(home,ID_FIND_LIST);nm.hdr.idFrom=ID_FIND_LIST;nm.hdr.code=NM_DBLCLK;nm.iItem=row;
+ SendMessageW(home,WM_NOTIFY,ID_FIND_LIST,(LPARAM)&nm);
+}
+static int arrow(HWND home,int col){                    /* 1 up, 2 down, 0 none */
+ HWND h=(HWND)SendMessageW(GetDlgItem(home,ID_FIND_LIST),LVM_GETHEADER,0,0);HDITEMW hd;memset(&hd,0,sizeof hd);hd.mask=HDI_FORMAT;
+ SendMessageW(h,HDM_GETITEMW,col,(LPARAM)&hd);return (hd.fmt&HDF_SORTUP)?1:(hd.fmt&HDF_SORTDOWN)?2:0;
+}
+#define KO_DOC L"\xBCF4\xACE0\xC11C \xCD5C\xC885.docx"
+static wchar_t findRoot2[600];
+/* two trees. The first:  Alpha\Report_2026.TXT (10 bytes, 3 days old), Alpha\Deep\(Korean).docx (20 bytes, 4 days),
+                          Beta\report-draft.md (3000 bytes, 1 day), Beta\other.bin (500 bytes, 2 days)
+              the second: Gamma\zeta_note.log (5 days). Beta counts as cloud storage. */
+static void fileOf(const wchar_t*path,int bytes,int daysOld){
+ FILE*f=_wfopen(path,L"wb");if(!f)return;for(int i=0;i<bytes;i++)fputc('x',f);fclose(f);stamp(path,-daysOld*24*60);
+}
 static void findFixture(void){
+ wchar_t both[1300],cloud[700];
  CreateDirectoryW(L"ff",NULL);CreateDirectoryW(L"ff\\Alpha",NULL);CreateDirectoryW(L"ff\\Alpha\\Deep",NULL);CreateDirectoryW(L"ff\\Beta",NULL);
- putfile(L"ff\\Alpha\\Report_2026.TXT","a");putfile(L"ff\\Beta\\report-draft.md","b");putfile(L"ff\\Beta\\other.bin","c");
- putfile(L"ff\\Alpha\\Deep\\\xBCF4\xACE0\xC11C \xCD5C\xC885.docx","d");
- GetFullPathNameW(L"ff",600,findRoot,NULL);
- SetEnvironmentVariableW(L"BC_FIND_ROOT",findRoot);
+ CreateDirectoryW(L"ff2",NULL);CreateDirectoryW(L"ff2\\Gamma",NULL);
+ fileOf(L"ff\\Alpha\\Report_2026.TXT",10,3);fileOf(L"ff\\Alpha\\Deep\\" KO_DOC,20,4);
+ fileOf(L"ff\\Beta\\report-draft.md",3000,1);fileOf(L"ff\\Beta\\other.bin",500,2);
+ fileOf(L"ff2\\Gamma\\zeta_note.log",7,5);
+ GetFullPathNameW(L"ff",600,findRoot,NULL);GetFullPathNameW(L"ff2",600,findRoot2,NULL);
+ swprintf(both,1300,L"%ls;%ls",findRoot,findRoot2);SetEnvironmentVariableW(L"BC_FIND_ROOT",both);
+ swprintf(cloud,700,L"%ls\\Beta",findRoot);SetEnvironmentVariableW(L"BC_FIND_CLOUD",cloud);
 }
 static void findChecks(void){
- HWND home=homeView();wchar_t want[900],label[200];uint32_t ids[10];
+ HWND home=homeView();wchar_t want[900],label[200],t[1200];uint32_t ids[10];
+ for(int i=0;i<100&&!(home&&GetDlgItem(home,ID_FIND_LIST));i++){Sleep(50);home=homeView();}   /* the view is still being built */
  check(home&&GetDlgItem(home,ID_FIND_EDIT)&&GetDlgItem(home,ID_FIND_BTN)&&GetDlgItem(home,ID_FIND_LIST),"Home has the file search field, button and list");
  if(!home)return;
  HWND list=GetDlgItem(home,ID_FIND_LIST),recent=GetDlgItem(home,ID_RECENT);
  check(!shown(list)&&shown(recent)&&fi_state==0,"before a search the recent sessions are shown and nothing is listed");
  search(home,L"report");
  for(int i=0;i<200&&fi_state!=2;i++)Sleep(50);
- check(fi_state==2,"the folder tree is listed");
- {int n=0;for(int i=0;i<60;i++){n=(int)SendMessageW(list,LB_GETCOUNT,0,0);if(n==2)break;Sleep(50);}
+ check(fi_state==2,"the folder trees are listed");
+ {int n=0;for(int i=0;i<60;i++){n=rows(home);if(n==2)break;Sleep(50);}
   check(n==2,"the first search fills in by itself once the listing is done");}
- {RECT re,rb2,rl;GetWindowRect(GetDlgItem(home,ID_FIND_EDIT),&re);GetWindowRect(GetDlgItem(home,ID_FIND_BTN),&rb2);GetWindowRect(list,&rl);
+ {RECT re,rb2,rl,rk;GetWindowRect(GetDlgItem(home,ID_FIND_EDIT),&re);GetWindowRect(GetDlgItem(home,ID_FIND_BTN),&rb2);GetWindowRect(list,&rl);GetWindowRect(GetDlgItem(home,ID_FIND_KIND),&rk);
   check(re.bottom-re.top>=16&&re.right-re.left>=200&&rb2.bottom-rb2.top>=16&&rb2.right-rb2.left>=40,"the search field and button have a usable size");
-  check(rb2.left>=re.right&&re.bottom<=rl.top&&rb2.bottom<=rl.top,"the field is left of the button, both above the list");}
- check(fi_mode==2,"it was listed by walking the folders");
+  check(rb2.left>=re.right&&re.bottom<=rk.top&&rk.top<rl.top,"the field is left of the button; the filters are below it, above the list");}
+ check(fi_mode==2,"they were listed by walking the folders");
  check(search(home,L"report")==2,"two names contain the text, whatever their case");
  swprintf(want,900,L"%ls\\Alpha\\Report_2026.TXT",findRoot);check(hasRow(home,want),"a result is the full path of the file");
  swprintf(want,900,L"%ls\\Beta\\report-draft.md",findRoot);check(hasRow(home,want),"the other result too");
  check(shown(list)&&!shown(recent),"the results take the place of the recent sessions");
  GetWindowTextW(GetDlgItem(home,ID_RLABEL),label,200);check(wcsstr(label,L"\xACB0\xACFC 2\xAC1C")!=NULL,"the heading shows the number of results");
  check(search(home,L"\xCD5C\xC885")==1,"a Korean name is found");
- swprintf(want,900,L"%ls\\Alpha\\Deep\\\xBCF4\xACE0\xC11C \xCD5C\xC885.docx",findRoot);check(rowIs(home,0,want),"with its full path");
+ swprintf(want,900,L"%ls\\Alpha\\Deep\\" KO_DOC,findRoot);check(rowIs(home,0,want),"with its full path");
  check(search(home,L"DEEP")==1,"folders are found too");
  check(search(home,L"no-such-name-anywhere")==0,"a text that no name contains gives no rows");
- check(find_query(L"REPORT",ids,10)==2&&find_query(L".",ids,10)==4&&find_query(L"",ids,10)==0,"searching the index directly agrees");
- /* filters. The tree: Alpha\\Report_2026.TXT, Alpha\\Deep\\(Korean).docx, Beta\\report-draft.md, Beta\\other.bin */
+ check(find_query(L"REPORT",ids,10)==2&&find_query(L".",ids,10)==5&&find_query(L"",ids,10)==0,"searching the index directly agrees");
+ /* the columns of a row */
+ check(filtered(home,L"draft",0,L"",L"")==1,"one row to read");
+ cell(home,0,0,t,1200);check(!wcscmp(t,L"report-draft.md"),"column 1 is the name");
+ cell(home,0,1,t,1200);check(wcslen(t)==16&&t[4]==L'-'&&t[10]==L' '&&t[13]==L':',"column 2 is the modification date and time");
+ cell(home,0,2,t,1200);check(!wcsncmp(t,L"md ",3),"column 3 is the type");
+ cell(home,0,3,t,1200);check(!wcscmp(t,L"3KB"),"column 4 is the size, rounded up to KB");
+ cell(home,0,4,t,1200);swprintf(want,900,L"%ls\\Beta",findRoot);check(!_wcsicmp(t,want),"column 5 is the folder");
+ check(filtered(home,L"deep",0,L"",L"")==1,"a folder row");
+ cell(home,0,3,t,1200);check(!t[0],"a folder shows no size");
+ cell(home,0,2,t,1200);check(t[0]!=0&&wcsncmp(t,L"deep",4),"and its type says it is a folder");
+ /* sorting: newest first to begin with; a click on a header sorts by that column, a second click turns it */
+ check(filtered(home,L".",1,L"",L"")==4,"the four files of the first tree");
+ check(order(home,L"report-draft.md|other.bin|Report_2026.TXT|" KO_DOC)&&arrow(home,1)==2,"newest first by default, the date header shows a down arrow");
+ clickColumn(home,1);check(order(home,KO_DOC L"|Report_2026.TXT|other.bin|report-draft.md")&&arrow(home,1)==1,"date again: oldest first");
+ clickColumn(home,0);check(order(home,L"other.bin|report-draft.md|Report_2026.TXT|" KO_DOC)&&arrow(home,0)==1&&arrow(home,1)==0,"name: A first, case ignored; the arrow moves to that header");
+ clickColumn(home,0);check(order(home,KO_DOC L"|Report_2026.TXT|report-draft.md|other.bin")&&arrow(home,0)==2,"name again: reversed");
+ clickColumn(home,3);check(order(home,L"report-draft.md|other.bin|" KO_DOC L"|Report_2026.TXT"),"size: largest first");
+ clickColumn(home,3);check(order(home,L"Report_2026.TXT|" KO_DOC L"|other.bin|report-draft.md"),"size again: smallest first");
+ clickColumn(home,2);check(order(home,L"other.bin|" KO_DOC L"|report-draft.md|Report_2026.TXT"),"type: by extension");
+ clickColumn(home,4);check(order(home,L"Report_2026.TXT|" KO_DOC L"|other.bin|report-draft.md"),"folder: by the path of the folder, then by name");
+ check(filtered(home,L"e",0,L"",L"")==5&&order(home,L"Beta|Deep|Report_2026.TXT|other.bin|report-draft.md"),"a new search keeps the chosen order");
+ clickColumn(home,1);check(arrow(home,1)==2&&filtered(home,L".",1,L"",L"")==4&&order(home,L"report-draft.md|other.bin|Report_2026.TXT|" KO_DOC),"back to newest first");
+ /* filters. The first tree: Alpha\Report_2026.TXT, Alpha\Deep\(Korean).docx, Beta\report-draft.md, Beta\other.bin */
  check(GetDlgItem(home,ID_FIND_KIND)&&GetDlgItem(home,ID_FIND_EXT)&&GetDlgItem(home,ID_FIND_PATH),"Home has the kind, extension and folder filters");
  check(SendMessageW(GetDlgItem(home,ID_FIND_KIND),CB_GETCOUNT,0,0)==9,"the kind filter offers nine kinds");
  check(filtered(home,L"a",2,L"",L"")==2,"folders only: Alpha and Beta contain the letter");
@@ -409,12 +479,29 @@ static void findChecks(void){
  check(filtered(home,L"",0,L"bin",L"BETA")==1&&filtered(home,L"report",0,L"",L"alpha")==1,"folder filter with the other filters");
  check(filtered(home,L"",2,L"",L"alpha")==1,"folders only inside Alpha: Deep");
  check(filtered(home,L"",0,L"",L"no-such-folder")==0,"a folder text that no path contains gives no rows");
- {uint32_t f[6]={1,0,0,0,0,0};check(find_query2(L"",ids,10,f)==4,"searching the index directly with a filter agrees");}
+ {uint32_t f[8]={1,0,0,0,0,0,0,0};check(find_query2(L"",ids,10,f)==5,"searching the index directly with a filter agrees");}
+ /* drives: each listed tree is a row of the drive filter */
+ {HWND d=GetDlgItem(home,ID_FIND_DRIVE);wchar_t n1[700]={0},n2[700]={0};
+  check(SendMessageW(d,CB_GETCOUNT,0,0)==3,"the drive filter lists all drives and the two trees");
+  SendMessageW(d,CB_GETLBTEXT,1,(LPARAM)n1);SendMessageW(d,CB_GETLBTEXT,2,(LPARAM)n2);
+  check(!_wcsicmp(n1,findRoot)&&!_wcsicmp(n2,findRoot2),"named after the trees");}
+ check(filtered2(home,L".",1,L"",L"",0,0)==5,"all drives: the files of both trees");
+ check(filtered2(home,L".",1,L"",L"",1,0)==4,"the first drive only");
+ check(filtered2(home,L".",1,L"",L"",2,0)==1,"the second drive only");
+ swprintf(want,900,L"%ls\\Gamma\\zeta_note.log",findRoot2);check(rowIs(home,0,want),"which holds the log file");
+ check(filtered2(home,L"",0,L"",L"",2,0)==2,"a drive alone lists everything on it: the folder and the file");
+ check(filtered2(home,L"report",0,L"",L"",2,0)==0,"a name that is on the other drive only");
+ /* cloud storage: Beta of the first tree */
+ check(fi_ncloud==1,"one cloud storage folder is known");
+ check(filtered2(home,L".",1,L"",L"",0,0)==5,"cloud included: every file");
+ check(filtered2(home,L".",1,L"",L"",0,1)==3&&order(home,L"Report_2026.TXT|" KO_DOC L"|zeta_note.log"),"cloud left out: not the two files in Beta");
+ check(filtered2(home,L".",1,L"",L"",0,2)==2&&order(home,L"report-draft.md|other.bin"),"cloud only: the two files in Beta");
+ check(filtered2(home,L"",2,L"",L"",0,2)==1,"the cloud folder itself counts as cloud");
+ check(filtered2(home,L"",0,L"",L"",2,2)==0,"the second drive has nothing in the cloud");
  /* opening what was found */
  check(filtered(home,L"other",0,L"",L"")==1,"one row to open");
  swprintf(want,900,L"%ls\\Beta\\other.bin",findRoot);
- SendMessageW(list,LB_SETCURSEL,0,0);shCalls=0;
- SendMessageW(home,WM_COMMAND,MAKEWPARAM(ID_FIND_LIST,LBN_DBLCLK),(LPARAM)list);
+ selectRow(list,0);shCalls=0;doubleClick(home,0);
  check(shCalls==1&&!wcscmp(shVerb,L"open")&&!_wcsicmp(shFile,want)&&!shArgs[0],"double click opens the file with its registered program");
  menuAnswer=0;menuShown=0;shCalls=0;SendMessageW(home,WM_CONTEXTMENU,(WPARAM)list,(LPARAM)-1);
  check(menuShown==6&&shCalls==0,"the menu has five actions and a separator; leaving it does nothing");
@@ -426,12 +513,12 @@ static void findChecks(void){
  menuAnswer=5;shCalls=0;clipText[0]=0;SendMessageW(home,WM_CONTEXTMENU,(WPARAM)list,(LPARAM)-1);
  check(shCalls==0&&!_wcsicmp(clipText,want),"menu: copy the path");
  check(filtered(home,L"Report_2026",0,L"",L"")==1,"a text file to open in the application");
- SendMessageW(list,LB_SETCURSEL,0,0);
+ selectRow(list,0);
  {uint64_t before=g_nsess;menuAnswer=4;shCalls=0;SendMessageW(home,WM_CONTEXTMENU,(WPARAM)list,(LPARAM)-1);
   for(int i=0;i<40&&g_nsess==before;i++)Sleep(50);
   check(shCalls==0&&g_nsess==before+1,"menu: open in a session of the application");}
  menuAnswer=0;
- filtered(home,L"",0,L"",L"");
+ search(home,L"");
  GetWindowTextW(GetDlgItem(home,ID_RLABEL),label,200);
  check(!shown(list)&&shown(recent)&&!wcscmp(label,L"\xCD5C\xADFC \xC138\xC158"),"empty fields and no filter bring the recent sessions back");
 }
@@ -446,25 +533,41 @@ static int mftFixture(void){                             /* 1 when the test can 
  wchar_t cwd[600],drive[3]=L"X:";GetCurrentDirectoryW(600,cwd);
  if(cwd[1]!=L':'||!canOpenVolume(cwd[0]))return 0;
  drive[0]=cwd[0];SetEnvironmentVariableW(L"BC_FIND_ROOT",drive);
+ SetEnvironmentVariableW(L"BC_FIND_CLOUD",L"?");       /* no cloud folders: nothing of the machine is looked up */
+ if(usnMode)SetEnvironmentVariableW(L"BC_FIND_MODE",L"usn");
  swprintf(probeName,80,L"bc_find_probe_%X_%X.tmp",(unsigned)GetCurrentProcessId(),(unsigned)GetTickCount());
- swprintf(probePath,700,L"%ls\\%ls",cwd,probeName);putfile(probePath,"probe");
+ swprintf(probePath,700,L"%ls\\%ls",cwd,probeName);fileOf(probePath,5000,2);
  return 1;
 }
 static void mftChecks(void){
- HWND home=homeView();uint32_t ids[4];wchar_t path[1200];
+ HWND home=homeView();uint32_t ids[4];wchar_t path[1200],t[1200];
+ for(int i=0;i<100&&!(home&&GetDlgItem(home,ID_FIND_LIST));i++){Sleep(50);home=homeView();}
  if(!home){check(0,"Home view exists");return;}
  DWORD t0=GetTickCount();
  search(home,probeName);
  for(int i=0;i<2000&&fi_state!=2;i++)Sleep(50);
  printf("drive listed in %lu ms: %llu entries, mode %llu\n",(unsigned long)(GetTickCount()-t0),(unsigned long long)fi_vis,(unsigned long long)fi_mode);
  check(fi_state==2,"the drive is listed");
- check(fi_mode==1,"it was read from the file table of the volume");
+ if(usnMode)check(fi_mode==4,"it was enumerated from the file table of the volume");
+ else check(fi_mode==1,"it was parsed from the file table of the volume");
  check(fi_vis>10,"the index holds the names of the drive");      /* a build machine's work drive can be nearly empty */
  t0=GetTickCount();int n=find_query(probeName,ids,4);DWORD dt=GetTickCount()-t0;
  printf("one search over the index: %lu ms\n",(unsigned long)dt);
  check(n==1,"the file created before the search is found, once");
  check(n==1&&find_path(ids[0],path,1200)>0&&!_wcsicmp(path,probePath),"its path is rebuilt from the folder records");
  check(search(home,probeName)==1&&rowIs(home,0,probePath),"the Home list shows it");
+ if(n==1&&!usnMode){
+  WIN32_FILE_ATTRIBUTE_DATA a;GetFileAttributesExW(probePath,GetFileExInfoStandard,&a);
+  uint64_t real=((uint64_t)a.ftLastWriteTime.dwHighDateTime<<32)|a.ftLastWriteTime.dwLowDateTime;
+  check(find_time(ids[0])==real,"the index has its modification time");
+  check(find_size(ids[0])==5000,"and its size");
+  cell(home,0,3,t,1200);check(!wcscmp(t,L"5KB"),"the size column shows it");
+  /* everything on the drive, sorted: how long the worst case takes */
+  t0=GetTickCount();int all=filtered2(home,L"",1,L"",L"",0,0);
+  printf("every file of the drive (%d rows) found and sorted by date in %lu ms\n",all,(unsigned long)(GetTickCount()-t0));
+  check(all>10,"every file of the drive can be listed");
+ }
+ if(n==1&&usnMode){check(find_time(ids[0])==0,"this way of listing has no times");cell(home,0,1,t,1200);check(!t[0],"so the date column stays empty");}
  DeleteFileW(probePath);
 }
 static DWORD WINAPI watcher(void*arg){
@@ -472,6 +575,14 @@ static DWORD WINAPI watcher(void*arg){
  for(int i=0;i<200&&!frame;i++){EnumThreadWindows(mainTid,onTop,0);if(!frame)Sleep(50);}
  check(frame!=NULL,"frame window created");
  if(!frame){PostThreadMessageW(mainTid,WM_QUIT,0,0);return 0;}
+ /* the frame exists before its views are built and laid out: wait for the Home view and the tab-row buttons */
+ for(int i=0;i<100;i++){
+  HWND hv=FindWindowExW(frame,NULL,L"BCHome",NULL),bx=GetDlgItem(frame,IDM_EXIT),bc=GetDlgItem(frame,IDM_CLOSE_TAB);RECT r={0,0,0,0},c={0,0,0,0};
+  if(bx)GetWindowRect(bx,&r);
+  if(bc)GetWindowRect(bc,&c);
+  if(hv&&GetDlgItem(hv,ID_FIND_LIST)&&r.right-r.left>=16&&r.bottom-r.top>=12&&c.right-c.left>=16&&c.bottom-c.top>=12)break;
+  Sleep(50);
+ }
  if(browseMode){tabRowChecks();tooltipChecks();browseChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
  if(findMode){findChecks();tooltipChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
  if(mftMode){mftChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
@@ -547,7 +658,8 @@ int main(int argc,char**argv){
  fmergeMode=argc>1&&!strcmp(argv[1],"fmerge");
  browseMode=argc>1&&!strcmp(argv[1],"browse");
  findMode=argc>1&&!strcmp(argv[1],"find");
- mftMode=argc>1&&!strcmp(argv[1],"findmft");
+ usnMode=argc>1&&!strcmp(argv[1],"findusn");
+ mftMode=usnMode||(argc>1&&!strcmp(argv[1],"findmft"));
  if(findMode)findFixture();
  if(mftMode&&!mftFixture()){printf("SKIP the volume cannot be opened (no administrator rights)\n0 checks, 0 failures\n");return 0;}
  tempFixture();

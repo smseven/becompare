@@ -58,8 +58,8 @@ for d in ["left","right","emptyA","emptyB","dirLeft/only-left","dirRight","local
 tmp=fixtures/"tmp"; tmp.mkdir()
 ui_env=dict(os.environ,LOCALAPPDATA=str(fixtures/"ui/local-app-data"),TEMP=str(tmp),TMP=str(tmp))
 ui_checks=0
-for mode in ["text","merge","fmerge","browse","find","findmft"]:
-    r=run([OUT/"test_ui.exe",mode],fixtures/"ui",timeout=200 if mode=="findmft" else 90,env=ui_env)
+for mode in ["text","merge","fmerge","browse","find","findmft","findusn"]:
+    r=run([OUT/"test_ui.exe",mode],fixtures/"ui",timeout=200 if mode.startswith("find") else 90,env=ui_env)
     if "SKIP" in r.stdout: print(r.stdout.splitlines()[0])
     (fixtures/("test_ui_"+mode+".log")).write_text(r.stdout,encoding="utf-8")
     ui_checks+=int(re.search(r"(\d+) checks, 0 failures",r.stdout).group(1))
