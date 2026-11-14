@@ -841,6 +841,10 @@ fold_start:
     mov rbx, rdx
     cmp qword [rbx+F_SYNCRUN], 0
     jne .busy
+    invoke fold_pv_confirm, rsi, rbx
+    test eax, eax
+    jz .stay                         ; cancelled: the unsaved changes stay where they are
+    invoke fold_pv_load, rsi, rbx, -1   ; the entries are replaced: the preview waits for a new choice
     cmp qword [rbx+F_RUNNING], 0
     je .idle
     mov byte [rbx+F_CANCEL], 1
@@ -907,6 +911,8 @@ fold_start:
     EPILOG 64
 .busy:
     invoke msgbox, rsi, &s_busy, MB_OK|MB_ICONWARNING
+    EPILOG 64
+.stay:
     EPILOG 64
 
 ; fold_done(hwnd, sess, fold, cancelled)
@@ -2286,6 +2292,28 @@ fold_report_path:
     add r12d, r14d
 %endmacro
 
+%macro PVP 2                         ; a control of the preview toolbar, from the left
+    mov ecx, %2
+    call scl
+    mov ebx, eax
+    MVID rsi, %1, r12, r13, rbx, r15
+    lea r12d, [r12+rbx]
+    add r12d, r14d
+%endmacro
+
+%macro PVR 2                         ; the same, from the right edge (the cursor is in [rsp+160])
+    mov ecx, %2
+    call scl
+    mov ebx, eax
+    mov rax, [rsp+160]
+    sub eax, ebx
+    mov [rsp+160], rax
+    MVID rsi, %1, [rsp+160], r13, rbx, r15
+    mov rax, [rsp+160]
+    sub eax, r14d
+    mov [rsp+160], rax
+%endmacro
+
 %macro SEP 0                         ; a little more room between two groups of buttons
     add r12d, r14d
     add r12d, r14d
@@ -2333,6 +2361,7 @@ fold_layout:
     PLACE ID_LBL_CRIT, 76
     PLACEH ID_CRIT, 190, 240
     PLACE ID_BTN_OPTS, 40
+    PLACE ID_BTN_PVTOG, 40
     ; the name filter at the right end of this row; on a row of its own when the window is too narrow
     mov ecx, 52
     call scl
@@ -2418,20 +2447,115 @@ fold_layout:
     lea r13d, [r13+r15]
     add r13d, r14d                   ; y of the list
 .norow3:
-    mov ebp, [rsp+108]
-    sub ebp, r13d
-    sub ebp, r15d                    ; the hint line takes the last row
+    invoke GetWindowLongPtrW, rsi, GWLP_USERDATA
+    xor ecx, ecx
+    test rax, rax
+    jz .nofold
+    mov rcx, [rax+SS_DATA]
+.nofold:
+    mov [rsp+184], rcx               ; the state of the folder view (0 while it is being created)
+    mov eax, [rsp+108]
+    sub eax, r13d
+    jns .av
+    xor eax, eax
+.av:
+    mov [rsp+176], rax               ; the height under the toolbar
+    xor edi, edi                     ; the height of the preview
+    invoke get_chk, rsi, ID_BTN_PVTOG
+    test eax, eax
+    jz .nopv
+    mov rcx, [rsp+184]
+    test rcx, rcx
+    jz .nopv
+    mov edx, 100
+    sub edx, [rcx+F_SPLIT]
+    mov eax, [rsp+176]
+    imul eax, edx
+    xor edx, edx
+    mov ecx, 100
+    div ecx
+    mov edi, eax
+.nopv:
+    mov ebp, [rsp+176]
+    sub ebp, edi
+    sub ebp, r15d                    ; the hint line takes the last row of the upper part
     jns .h
     xor ebp, ebp
 .h:
     mov ebx, [rsp+104]
     MVID rsi, ID_LIST, 0, r13, rbx, rbp
     lea eax, [r13+rbp]
-    add eax, r14d
     mov [rsp+136], rax
     sub ebx, r14d
     sub ebx, r14d
     MVID rsi, ID_LBL_HINT, r14, [rsp+136], rbx, r15
+    mov rcx, [rsp+184]
+    test rcx, rcx
+    jz .out
+    mov eax, r13d
+    mov [rcx+F_LTOP], rax
+    mov eax, [rsp+176]
+    mov [rcx+F_AVAIL], rax
+    mov qword [rcx+F_SPH], 0
+    test edi, edi
+    jz .vis
+    ; the preview: a strip to drag, a toolbar row, the view
+    mov eax, [rsp+176]
+    sub eax, edi
+    add eax, r13d
+    mov r12d, eax                    ; y of the strip
+    mov [rcx+F_SPY], rax
+    mov ecx, 6
+    call scl
+    mov ebx, eax                     ; its height
+    mov rcx, [rsp+184]
+    mov [rcx+F_SPH], rbx
+    add r12d, ebx
+    mov r13d, r12d                   ; y of the toolbar row
+    mov r12d, r14d
+    PVP ID_PV_PREV, 34
+    PVP ID_PV_NEXT, 34
+    SEP
+    PVP ID_PV_SRC, 34
+    SEP
+    PVP ID_PV_PF, 34
+    PVP ID_PV_NF, 34
+    SEP
+    PVP ID_PV_CLR, 44
+    PVP ID_PV_CRL, 44
+    PVP ID_PV_SAVE, 34
+    SEP
+    PVP ID_PV_FOLD, 34
+    SEP
+    PVP ID_PV_LBL, 130
+    mov eax, [rsp+104]
+    sub eax, r14d
+    mov [rsp+160], rax
+    PVR ID_PV_SET, 34
+    PVR ID_PV_UNI, 64
+    PVR ID_PV_SIDE, 64
+    ; the view and the message take the rest
+    mov eax, r13d
+    add eax, r15d
+    add eax, r14d
+    mov [rsp+136], rax               ; y of the view
+    mov eax, [rsp+108]
+    sub eax, [rsp+136]
+    jns .vh
+    xor eax, eax
+.vh:
+    mov [rsp+144], rax
+    mov ebx, [rsp+104]
+    MVID rsi, ID_LBL_PVMSG, 0, [rsp+136], rbx, [rsp+144]
+    mov rcx, [rsp+184]
+    mov rcx, [rcx+F_PVVIEW]
+    test rcx, rcx
+    jz .vis
+    invoke MoveWindow, rcx, 0, [rsp+136], rbx, [rsp+144], 1
+.vis:
+    mov rdx, [rsp+184]
+    invoke fold_pv_vis, rsi, rdx
+.out:
     EPILOG 192
 
 ; ---------------------------------------------------------------- window procedure
@@ -2458,6 +2582,24 @@ fold_proc:
     je .command
     cmp edi, WM_NOTIFY
     je .notify
+    cmp edi, WM_TIMER
+    je .timer
+    cmp edi, 0x201                   ; WM_LBUTTONDOWN
+    je .lbd
+    cmp edi, 0x200                   ; WM_MOUSEMOVE
+    je .mm
+    cmp edi, 0x202                   ; WM_LBUTTONUP
+    je .lbu
+    cmp edi, 0x20                    ; WM_SETCURSOR
+    je .setcur
+    cmp edi, BC_ISDIRTY
+    je .isdirty
+    cmp edi, BC_SAVE
+    je .savepv
+    cmp edi, BC_NEXTDIFF
+    je .nextdiff
+    cmp edi, BC_PREVDIFF
+    je .prevdiff
     cmp edi, BC_RUN
     je .run
     cmp edi, BC_STOPPING
@@ -2603,6 +2745,7 @@ fold_proc:
     mov [g_sysil], rax
     invoke SendMessageW, rbx, LVM_SETIMAGELIST, 1, rax          ; LVSIL_SMALL
     invoke mk_lbl, rsi, &s_hint, ID_LBL_HINT
+    invoke fold_pv_create, rsi, r15
     xor ebp, ebp
 .col:
     cmp ebp, 8
@@ -2631,6 +2774,7 @@ fold_proc:
     invoke pb_load, rsi, r14
     invoke fold_opts_apply, rsi, r14, r15
     invoke fold_crit_sync, rsi
+    invoke SetTimer, rsi, 52, 500, 0        ; keeps "differences N" of the preview up to date
     invoke fold_theme, r15
     xor eax, eax
     EPILOG 320
@@ -2638,6 +2782,21 @@ fold_proc:
 .erase:
     invoke GetClientRect, rsi, &rsp+96
     invoke FillRect, r12, &rsp+96, [th_panelbrush]
+    invoke GetWindowLongPtrW, rsi, GWLP_USERDATA
+    test rax, rax
+    jz .erdone
+    mov rax, [rax+SS_DATA]
+    test rax, rax
+    jz .erdone
+    cmp qword [rax+F_SPH], 0
+    je .erdone
+    mov ecx, [rax+F_SPY]
+    add ecx, 2
+    mov [rsp+100], ecx               ; a thin bar in the middle of the strip
+    add ecx, 2
+    mov [rsp+108], ecx
+    invoke FillRect, r12, &rsp+96, [th_bgbrush]
+.erdone:
     mov eax, 1
     EPILOG 320
 
@@ -2715,7 +2874,12 @@ fold_proc:
     je .b_opts
     cmp ebx, ID_FILTER
     je .b_filter
-    jmp .def
+    cmp ebx, ID_PV_PREV
+    jb .def
+    cmp ebx, ID_BTN_PVTOG
+    ja .def
+    invoke fold_pv_cmd, rsi, r15, rbx
+    jmp .zero
 .b_lr:
     invoke fold_copy, rsi, r15, 0
     jmp .zero
@@ -2824,14 +2988,107 @@ fold_proc:
     jmp .zero
 .theme:
     invoke fold_theme, r15
+    invoke SendMessageW, [r15+F_PVVIEW], BC_THEME, 0, 0
     invoke InvalidateRect, rsi, 0, 1
     jmp .zero
+
+.timer:
+    cmp r12, 51                      ; the selection settled: show its pair
+    jne .tm2
+    invoke KillTimer, rsi, 51
+    mov r8, [r15+F_PVROW]
+    invoke fold_pv_switch, rsi, r15, r8
+    jmp .zero
+.tm2:
+    cmp r12, 52
+    jne .zero
+    invoke fold_pv_label, rsi, r15
+    jmp .zero
+.isdirty:
+    invoke fold_pv_dirty, r15
+    EPILOG 320
+.savepv:
+    invoke SendMessageW, [r15+F_PVVIEW], BC_SAVE, 0, 0
+    jmp .zero
+.nextdiff:
+    invoke SendMessageW, [r15+F_PVVIEW], BC_NEXTDIFF, 0, 0
+    jmp .zero
+.prevdiff:
+    invoke SendMessageW, [r15+F_PVVIEW], BC_PREVDIFF, 0, 0
+    jmp .zero
+; the strip between the list and the preview can be dragged
+.lbd:
+    cmp qword [r15+F_SPH], 0
+    je .def
+    mov rax, r13
+    shr rax, 16
+    movsx eax, ax
+    cmp eax, [r15+F_SPY]
+    jl .def
+    mov edx, [r15+F_SPY]
+    add edx, [r15+F_SPH]
+    cmp eax, edx
+    jge .def
+    invoke SetCapture, rsi
+    mov qword [r15+F_DRAG], 1
+    jmp .zero
+.mm:
+    cmp qword [r15+F_DRAG], 0
+    je .def
+    mov rax, r13
+    shr rax, 16
+    movsx eax, ax
+    sub eax, [r15+F_LTOP]
+    jns .mp
+    xor eax, eax
+.mp:
+    imul eax, 100
+    xor edx, edx
+    mov ecx, [r15+F_AVAIL]
+    test ecx, ecx
+    jz .zero
+    div ecx
+    cmp eax, 15
+    jae .m1
+    mov eax, 15
+.m1:
+    cmp eax, 85
+    jbe .m2
+    mov eax, 85
+.m2:
+    mov [r15+F_SPLIT], rax
+    invoke fold_layout, rsi
+    jmp .zero
+.lbu:
+    cmp qword [r15+F_DRAG], 0
+    je .def
+    call ReleaseCapture
+    mov qword [r15+F_DRAG], 0
+    jmp .zero
+.setcur:
+    cmp qword [r15+F_SPH], 0
+    je .def
+    invoke GetCursorPos, &rsp+96
+    invoke ScreenToClient, rsi, &rsp+96
+    mov eax, [rsp+100]
+    cmp eax, [r15+F_SPY]
+    jl .def
+    mov edx, [r15+F_SPY]
+    add edx, [r15+F_SPH]
+    cmp eax, edx
+    jge .def
+    invoke LoadCursorW, 0, 32645     ; IDC_SIZENS
+    invoke SetCursor, rax
+    mov eax, 1
+    EPILOG 320
 
 .notify:
     mov rax, [r13+NMH_FROM]
     cmp rax, [r15+F_HLIST]
     jne .def
     mov eax, [r13+NMH_CODE]
+    cmp eax, -101                    ; LVN_ITEMCHANGED: a row was selected
+    je .itemchg
     cmp eax, LVN_GETDISPINFOW
     je .disp
     cmp eax, NM_CUSTOMDRAW
@@ -2974,6 +3231,17 @@ fold_proc:
 .rclick:
     invoke fold_ctx, rsi, r15
     jmp .zero
+.itemchg:
+    test dword [r13+40], 8           ; uChanged: the state
+    jz .zero
+    test dword [r13+32], 2           ; uNewState: selected
+    jz .zero
+    cmp qword [r15+F_PVGUARD], 0
+    jne .zero
+    movsxd rax, dword [r13+24]
+    mov [r15+F_PVROW], rax
+    invoke SetTimer, rsi, 51, 120, 0
+    jmp .zero
 .click:
     mov rax, [r13+44]                ; where the mouse was: NMITEMACTIVATE.ptAction
     mov [rsp+96], rax
@@ -3081,6 +3349,14 @@ fold_proc:
     invoke WaitForSingleObject, rcx, 0xFFFFFFFF
     invoke CloseHandle, [r15+F_SYNCTHR]
 .nothr:
+    invoke KillTimer, rsi, 51
+    invoke KillTimer, rsi, 52
+    mov rcx, [r15+F_PVVIEW]
+    test rcx, rcx
+    jz .nopv
+    invoke DestroyWindow, rcx        ; before the record it reads is freed
+.nopv:
+    invoke free, [r15+F_PVSESS]
     invoke fold_free_vt, r15
     invoke fold_free_ents, r15
     invoke free, [r15+F_ENTS]

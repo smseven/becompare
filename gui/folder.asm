@@ -27,6 +27,7 @@ extern mk, reg_class, scl, set_status, msgbox, browse_save
 extern lv_dark_header, theme_checks, mk_btn, mk_chk, mk_lbl, mk_edit, get_chk, ctl_color, pb_create, pb_layout, pb_load, pb_collect, pb_command
 extern GetWindowTextLengthW, excl_match2, tip_add, ShowWindow, CharLowerBuffW, CharLowerW, g_iconfont
 extern SHGetFileInfoW, ImageList_Draw, th_accent
+extern SetTimer, KillTimer, SetCapture, ReleaseCapture, SetCursor, LoadCursorW, GetCursorPos, ScreenToClient, text_create
 extern vec_push, fmt_size, fmt_time, excl_match, sb_init, sb_append, sb_append_esc, sb_free, write_utf8
 extern NormalizeString, GetNamedSecurityInfoW, SetNamedSecurityInfoW, LocalFree, SetFileAttributesW, SetFileTime, icon_set, g_copyr, g_copyl, g_mover, g_movel, g_del, g_sync, g_pause, g_report, g_snap, g_expand, g_collapse, GetLastError, GetCurrentProcessId, MoveFileW, input_box, wcsncpy, wcstoul, GetSystemTimeAsFileTime, set_status_part, str_dup, add_session, set_tab_title, type_for_path, ext_launch, g_policy
 
@@ -100,7 +101,20 @@ extern g_batch, g_rep_path, g_exitcode, g_hframe, g_snap_path
 %define F_CLOSING 5152
 %define F_SCANERR 5160
 %define F_ATTRX   5176
-%define F_SIZE    5472
+%define F_PVSESS  5472              ; the session record of the preview view
+%define F_PVVIEW  5480              ; the preview view
+%define F_PVENT   5488              ; entry shown in the preview, -1 none
+%define F_PVROW   5496              ; row that was selected last (waits for the timer)
+%define F_PVGUARD 5504              ; the selection is being set by the program
+%define F_SPLIT   5512              ; percent of the height under the toolbar that the list takes
+%define F_DRAG    5520              ; the splitter is being dragged
+%define F_SPY     5528              ; the splitter strip: y, height
+%define F_SPH     5536
+%define F_LTOP    5544              ; top of the list and the height under the toolbar (for the splitter)
+%define F_AVAIL   5552
+%define F_PVPA    5568              ; wchar[520]: the pair shown in the preview
+%define F_PVPB    6608
+%define F_SIZE    7648
 %define ID_LBL_ATTRX 168
 %define ID_BTN_OPTS  178             ; opens / closes the row of less used options
 %define ID_LBL_CRIT  179
@@ -108,6 +122,21 @@ extern g_batch, g_rep_path, g_exitcode, g_hframe, g_snap_path
 %define ID_LBL_FILTER 181
 %define ID_FILTER    182             ; shows only the names that contain this text
 %define ID_LBL_HINT  183
+%define ID_LBL_PVMSG 184
+%define ID_PV_PREV   190             ; the toolbar of the preview
+%define ID_PV_NEXT   191
+%define ID_PV_SRC    192
+%define ID_PV_PF     193
+%define ID_PV_NF     194
+%define ID_PV_CLR    195
+%define ID_PV_CRL    196
+%define ID_PV_SAVE   197
+%define ID_PV_FOLD   198
+%define ID_PV_LBL    199
+%define ID_PV_SIDE   200
+%define ID_PV_UNI    201
+%define ID_PV_SET    202
+%define ID_BTN_PVTOG 203             ; shows / hides the preview
 %define EF_ACTSH     26              ; bits 26..28 of E_FLAGS: the action chosen in the middle column
 %define DI_IMAGE     60
 %define CD_RC        40
@@ -975,6 +1004,7 @@ scan_thread:
     EPILOG 64
 
 %include "folder_ui.inc"
+%include "folder_pv.inc"
 %include "folder_vfs.inc"
 %include "ftp.inc"
 %include "sync_dlg.inc"

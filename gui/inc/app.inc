@@ -11,7 +11,8 @@
 %define SS_PATHO  3152
 %define SS_OPTS   4192
 %define SS_TITLE  5216
-%define SS_SIZE   5376
+%define SS_EMBED  5376              ; a view inside another view (the preview of the folder compare): no toolbar, not a tab
+%define SS_SIZE   5384
 
 %define T_HOME    0
 %define T_FOLDER  1
@@ -40,6 +41,7 @@
 %define BC_BOOKMARK (WM_APP+32)
 %define BC_NEXTMARK (WM_APP+33)
 %define BC_PREVMARK (WM_APP+34)
+%define BC_TVQ      (WM_APP+60)       ; Text Compare view: wParam 0 number of differences, 1 pane with the caret, 2 current difference
 %define BC_PROGRESS (WM_APP+1)
 %define BC_DONE     (WM_APP+2)
 %define BC_SYNCPROG (WM_APP+3)

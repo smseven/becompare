@@ -3,6 +3,7 @@
    row colours, word level highlight, F7 / Shift+F7 navigation, the light and dark palettes.
    "test_ui merge" opens the same two files as a merge session and checks the colours of its panes.
    "test_ui folder" opens a folder compare and checks its toolbar, compare-by box, options rows and filters.
+   "test_ui folderpv" checks the preview under the list: showing a pair, differences, files, merge, save, the strip.
    "test_ui fmerge" runs a folder merge into an output folder and checks what it reports and writes.
    "test_ui browse" opens the folder dialog from a window hanging off the screen and checks where it lands.
    "test_ui find" searches a small folder tree through the file search of the Home tab.
@@ -66,7 +67,7 @@ extern uint32_t th_lonly, th_ronly, th_conf;
 #define IDM_LIGHT 1030
 #define IDM_DARK 1031
 
-static int checks, failed, shiftDown, boxes, mergeMode, fmergeMode, browseMode, findMode, mftMode, usnMode, folderMode, expectBoxes, shownBoxes;
+static int checks, failed, shiftDown, boxes, mergeMode, fmergeMode, browseMode, findMode, mftMode, usnMode, folderMode, pvMode, expectBoxes, shownBoxes;
 static wchar_t findRoot[600], probeName[80], probePath[700];
 static wchar_t lastBox[400];
 static DWORD mainTid;
@@ -814,6 +815,137 @@ static void folderChecks(void){
   check(holds(L"fc\\a\\diff.txt","right!\r\n"),"of two different files the newer one went over");
   menuAnswer=0;}
 }
+/* ---- folder compare: the preview under the list */
+#define PID_PREV 190
+#define PID_NEXT 191
+#define PID_SRC 192
+#define PID_PF 193
+#define PID_NF 194
+#define PID_CLR 195
+#define PID_CRL 196
+#define PID_SAVE 197
+#define PID_FOLD 198
+#define PID_LBL 199
+#define PID_SIDE 200
+#define PID_UNI 201
+#define PID_SET 202
+#define PID_TOG 203
+#define PID_MSG 184
+#define PID_HINT 183
+#define BC_TVQ_ (0x8000+60)
+static HWND pvView(void){return FindWindowExW(fv,NULL,L"BCText",NULL);}
+static HWND pvPane(int id){return GetDlgItem(pvView(),id);}
+static void paneText(int id,wchar_t*out,int cap){out[0]=0;SendMessageW(pvPane(id),WM_GETTEXT,cap,(LPARAM)out);}
+static int paneIs(int id,const wchar_t*want){wchar_t t[400];paneText(id,t,400);wchar_t o[400];int n=0;for(wchar_t*p=t;*p;p++){if(*p==L'\r'){o[n++]=L'|';if(p[1]==L'\n')p++;}else if(*p==L'\n')o[n++]=L'|';else o[n++]=*p;}o[n]=0;return !wcscmp(o,want);}
+static int waitPane(int id,const wchar_t*want){for(int i=0;i<60;i++){if(paneIs(id,want))return 1;Sleep(50);}return 0;}
+static int blocks(void){return (int)SendMessageW(pvView(),BC_TVQ_,0,0);}
+static int curBlock(void){return (int)SendMessageW(pvView(),BC_TVQ_,2,0);}
+static int pvShown(void){HWND v=pvView();return v&&(GetWindowLongPtrW(v,GWL_STYLE)&WS_VISIBLE);}
+static void pvClick(int id){SendMessageW(GetDlgItem(fv,id),BM_CLICK,0,0);}
+static void typeInto(int id,const wchar_t*t){HWND h=pvPane(id);SendMessageW(h,EM_SETSEL,0,0);SendMessageW(h,EM_REPLACESEL,TRUE,(LPARAM)t);}
+static int dirtyPv(void){return (int)SendMessageW(fv,0x8000+14,0,0);}    /* BC_ISDIRTY */
+static int selectedRow(void){return (int)SendMessageW(GetDlgItem(fv,FID_LIST),LVM_GETNEXTITEM,-1,LVNI_SELECTED);}
+static void pvFixture(void){
+ CreateDirectoryW(L"fp",NULL);CreateDirectoryW(L"fp\\a",NULL);CreateDirectoryW(L"fp\\b",NULL);
+ putfile(L"fp\\a\\a_multi.txt","one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven\r\neight\r\nnine\r\n");
+ putfile(L"fp\\b\\a_multi.txt","ONE\r\ntwo\r\nthree\r\nFOUR\r\nfive\r\nsix\r\nSEVEN\r\neight\r\nnine\r\n");
+ putfile(L"fp\\a\\b_mod.txt","left\r\n");putfile(L"fp\\b\\b_mod.txt","right\r\n");
+ putfile(L"fp\\a\\c_other.txt","alpha\r\n");putfile(L"fp\\b\\c_other.txt","omega\r\n");
+ putfile(L"fp\\a\\d_same.txt","same\r\n");putfile(L"fp\\b\\d_same.txt","same\r\n");
+ putfile(L"fp\\a\\e.bin","\x01\x02\x03");putfile(L"fp\\b\\e.bin","\x01\x02\x04!");
+ putfile(L"fp\\a\\f_left.txt","only left\r\n");
+ const wchar_t*f[]={L"a_multi.txt",L"b_mod.txt",L"c_other.txt",L"d_same.txt",L"e.bin"};
+ for(int i=0;i<5;i++){wchar_t a[300],b[300];swprintf(a,300,L"fp\\a\\%ls",f[i]);swprintf(b,300,L"fp\\b\\%ls",f[i]);fixedTime(a,10);fixedTime(b,10);}
+ fixedTime(L"fp\\b\\a_multi.txt",12);fixedTime(L"fp\\b\\b_mod.txt",12);fixedTime(L"fp\\b\\c_other.txt",12);fixedTime(L"fp\\b\\e.bin",12);
+}
+static void pvChecks(void){
+ wchar_t t[400];
+ for(int i=0;i<100&&!fv;i++){fv=FindWindowExW(frame,NULL,L"BCFolder",NULL);if(!fv)Sleep(50);}
+ check(fv!=NULL,"folder compare session is open");
+ if(!fv)return;
+ check(waitRows(6),"six rows: four differing files, one equal, one only on the left");
+ /* nothing chosen yet */
+ check(pvView()!=NULL&&!pvShown(),"the preview view exists and shows nothing yet");
+ check(GetWindowLongPtrW(GetDlgItem(fv,PID_MSG),GWL_STYLE)&WS_VISIBLE,"a message says what the preview needs");
+ {RECT rl,rh,rt,rv,rb;GetWindowRect(GetDlgItem(fv,FID_LIST),&rl);GetWindowRect(GetDlgItem(fv,PID_HINT),&rh);GetWindowRect(GetDlgItem(fv,PID_PREV),&rt);GetWindowRect(GetDlgItem(fv,PID_MSG),&rv);GetWindowRect(fv,&rb);
+  check(rl.bottom<=rh.top+1&&rh.bottom<=rt.top&&rt.bottom<=rv.top&&rv.bottom<=rb.bottom,"list, hint line, preview toolbar and preview view are stacked in this order");
+  check(rt.bottom-rt.top>=16&&rv.bottom-rv.top>=60,"the preview has room");}
+ /* a differing text file: the pair is shown */
+ int r=rowNamed(L"a_multi.txt");selectF(r);
+ Sleep(1500);{wchar_t d[400];paneText(201,d,400);printf("DBG sel=%d shown=%d tog=%d len=%d\n",selectedRow(),pvShown(),(int)SendMessageW(GetDlgItem(fv,203),BM_GETCHECK,0,0),(int)wcslen(d));}
+ check(waitPane(201,L"one|two|three|four|five|six|seven|eight|nine"),"selecting a file shows its left side in the preview");
+ check(paneIs(202,L"ONE|two|three|FOUR|five|six|SEVEN|eight|nine"),"and its right side");
+ check(pvShown()&&!(GetWindowLongPtrW(GetDlgItem(fv,PID_MSG),GWL_STYLE)&WS_VISIBLE),"the view takes the place of the message");
+ for(int i=0;i<30&&blocks()!=3;i++)Sleep(50);
+ check(blocks()==3,"it found three differences");
+ GetWindowTextW(GetDlgItem(fv,PID_LBL),t,400);check(wcsstr(t,L"3")!=NULL,"the label over the view says so");
+ /* going through the differences */
+ check(curBlock()==0,"the first difference is current");
+ pvClick(PID_NEXT);check(curBlock()==1,"next difference");
+ pvClick(PID_NEXT);check(curBlock()==2,"next difference again");
+ pvClick(PID_PREV);check(curBlock()==1,"previous difference");
+ /* the buttons that change the view */
+ pvClick(PID_FOLD);check((int)SendMessageW(pvPane(220+0)?GetDlgItem(pvView(),217):NULL,BM_GETCHECK,0,0)==BST_CHECKED,"fold unchanged fragments is on");
+ pvClick(PID_FOLD);check((int)SendMessageW(GetDlgItem(pvView(),217),BM_GETCHECK,0,0)!=BST_CHECKED,"and off again");
+ pvClick(PID_UNI);check((int)SendMessageW(GetDlgItem(pvView(),218),BM_GETCHECK,0,0)==BST_CHECKED&&!(GetWindowLongPtrW(pvPane(202),GWL_STYLE)&WS_VISIBLE),"unified view: one pane");
+ check((int)SendMessageW(GetDlgItem(fv,PID_UNI),BM_GETCHECK,0,0)==BST_CHECKED&&(int)SendMessageW(GetDlgItem(fv,PID_SIDE),BM_GETCHECK,0,0)!=BST_CHECKED,"the two mode buttons show which one is on");
+ pvClick(PID_SIDE);check((int)SendMessageW(GetDlgItem(pvView(),218),BM_GETCHECK,0,0)!=BST_CHECKED&&(GetWindowLongPtrW(pvPane(202),GWL_STYLE)&WS_VISIBLE),"side by side: two panes again");
+ /* the file that was in the preview opens in the editor */
+ {uint64_t before=g_nsess;pvClick(PID_SRC);for(int i=0;i<40&&g_nsess==before;i++)Sleep(50);check(g_nsess==before+1,"the source button opens the file in the text editor");}
+ /* the next and the previous file */
+ pvClick(PID_NF);for(int i=0;i<40&&!waitPane(201,L"left");i++);
+ check(waitPane(201,L"left")&&paneIs(202,L"right"),"next file: b_mod.txt");
+ check(selectedRow()==rowNamed(L"b_mod.txt"),"and the list follows");
+ pvClick(PID_NF);check(waitPane(201,L"alpha"),"next file: c_other.txt");
+ pvClick(PID_PF);check(waitPane(201,L"left"),"previous file: b_mod.txt");
+ pvClick(PID_NF);pvClick(PID_NF);Sleep(300);
+ check(selectedRow()==rowNamed(L"e.bin")&&!pvShown(),"a file that is no text is selected but not previewed");
+ pvClick(PID_NF);check(selectedRow()==rowNamed(L"e.bin"),"no further file: the selection stays");
+ /* merging and saving */
+ selectF(rowNamed(L"b_mod.txt"));check(waitPane(202,L"right"),"b_mod.txt again");
+ check(!dirtyPv(),"nothing changed yet");
+ pvClick(PID_CLR);check(waitPane(202,L"left")&&dirtyPv(),"copy the difference from the left to the right: the right pane changes and counts as changed");
+ pvClick(PID_SAVE);Sleep(300);check(!dirtyPv()&&holds(L"fp\\b\\b_mod.txt","left\r\n"),"save writes the right file");
+ /* changes that are not saved stop a switch to another file */
+ selectF(rowNamed(L"c_other.txt"));check(waitPane(201,L"alpha"),"c_other.txt");
+ typeInto(201,L"edited ");check(dirtyPv(),"an edit makes the view dirty");
+ expectBoxes=1;shownBoxes=0;selectF(rowNamed(L"a_multi.txt"));
+ for(int i=0;i<40&&!shownBoxes;i++)Sleep(50);
+ Sleep(200);expectBoxes=0;
+ check(shownBoxes==1,"choosing another file asks about the unsaved changes");
+ check(selectedRow()==rowNamed(L"c_other.txt")&&paneIs(201,L"edited alpha"),"cancelled: the selection and the view stay");
+ expectBoxes=1;shownBoxes=0;SendMessageW(fv,WM_COMMAND,MAKEWPARAM(105,BN_CLICKED),(LPARAM)GetDlgItem(fv,105));   /* a new compare asks as well */
+ expectBoxes=0;check(shownBoxes==1&&paneIs(201,L"edited alpha"),"a new compare asks about the unsaved changes too");
+ /* the settings popup */
+ {
+#define OPT(id) ((int)SendMessageW(GetDlgItem(pvView(),id),BM_GETCHECK,0,0)==BST_CHECKED)
+  menuAnswer=12;pvClick(PID_SET);check(menuShown>=10&&OPT(212)&&!OPT(213),"settings: ignore whitespace");
+  menuAnswer=11;pvClick(PID_SET);check(!OPT(212)&&OPT(213),"settings: trim whitespace");
+  menuAnswer=10;pvClick(PID_SET);check(!OPT(212)&&!OPT(213),"settings: ignore nothing");
+  menuAnswer=13;pvClick(PID_SET);check(OPT(211),"settings: ignore case on");
+  menuAnswer=13;pvClick(PID_SET);check(!OPT(211),"settings: ignore case off");
+  menuAnswer=21;pvClick(PID_SET);check(!OPT(219),"settings: highlight lines only");
+  menuAnswer=20;pvClick(PID_SET);check(OPT(219),"settings: highlight words");
+  menuAnswer=31;pvClick(PID_SET);check(OPT(221),"settings: show blanks");
+  menuAnswer=31;pvClick(PID_SET);check(!OPT(221),"settings: hide blanks");
+  menuAnswer=30;pvClick(PID_SET);check(!OPT(215),"settings: syntax colours off");
+  menuAnswer=30;pvClick(PID_SET);check(OPT(215),"settings: syntax colours on");
+  {int sc=OPT(220);menuAnswer=1;pvClick(PID_SET);check(OPT(220)!=sc,"settings: scroll together toggles");menuAnswer=1;pvClick(PID_SET);}
+  {uint64_t before=g_nsess;menuAnswer=2;pvClick(PID_SET);for(int i=0;i<40&&g_nsess==before;i++)Sleep(50);check(g_nsess==before+1,"settings: show the pair in a window of its own");}
+  menuAnswer=0;
+ }
+ /* the strip between list and preview */
+ {RECT rl0,rl1,rh,rp;POINT p;GetWindowRect(GetDlgItem(fv,FID_LIST),&rl0);GetWindowRect(GetDlgItem(fv,PID_HINT),&rh);GetWindowRect(GetDlgItem(fv,PID_PREV),&rp);
+  p.x=200;p.y=(rh.bottom+rp.top)/2;ScreenToClient(fv,&p);
+  PostMessageW(fv,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(p.x,p.y));PostMessageW(fv,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(p.x,p.y-120));PostMessageW(fv,WM_LBUTTONUP,0,MAKELPARAM(p.x,p.y-120));
+  Sleep(400);GetWindowRect(GetDlgItem(fv,FID_LIST),&rl1);
+  check(rl1.bottom<rl0.bottom-60,"dragging the strip up makes the list shorter");}
+ /* hiding the preview */
+ {RECT rl0,rl1;GetWindowRect(GetDlgItem(fv,FID_LIST),&rl0);pvClick(PID_TOG);Sleep(200);GetWindowRect(GetDlgItem(fv,FID_LIST),&rl1);
+  check(rl1.bottom>rl0.bottom+60&&!pvShown()&&!(GetWindowLongPtrW(GetDlgItem(fv,PID_PREV),GWL_STYLE)&WS_VISIBLE),"the preview button hides it and gives the list the room");
+  pvClick(PID_TOG);Sleep(300);check((GetWindowLongPtrW(GetDlgItem(fv,PID_PREV),GWL_STYLE)&WS_VISIBLE)!=0,"and shows it again");}
+ SendMessageW(pvPane(201),EM_SETMODIFY,FALSE,0);SendMessageW(pvPane(202),EM_SETMODIFY,FALSE,0);
+}
 static DWORD WINAPI watcher(void*arg){
  (void)arg;
  for(int i=0;i<200&&!frame;i++){EnumThreadWindows(mainTid,onTop,0);if(!frame)Sleep(50);}
@@ -830,6 +962,7 @@ static DWORD WINAPI watcher(void*arg){
  if(browseMode){tabRowChecks();tooltipChecks();browseChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
  if(findMode){findChecks();tooltipChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
  if(folderMode){folderChecks();tooltipChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
+ if(pvMode){pvChecks();tooltipChecks();SendMessageW(fv,0x8000+14,0,0);PostMessageW(frame,WM_CLOSE,0,0);return 0;}
  if(mftMode){mftChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
  if(mergeMode){mergeChecks();tooltipChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
  if(fmergeMode){fmergeChecks();tooltipChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
@@ -905,6 +1038,8 @@ int main(int argc,char**argv){
  findMode=argc>1&&!strcmp(argv[1],"find");
  folderMode=argc>1&&!strcmp(argv[1],"folder");
  if(folderMode)folderFixture();
+ pvMode=argc>1&&!strcmp(argv[1],"folderpv");
+ if(pvMode)pvFixture();
  usnMode=argc>1&&!strcmp(argv[1],"findusn");
  mftMode=usnMode||(argc>1&&!strcmp(argv[1],"findmft"));
  if(findMode)findFixture();
@@ -915,6 +1050,7 @@ int main(int argc,char**argv){
  GetFullPathNameW(L"ui_a.c",400,a,NULL);GetFullPathNameW(L"ui_b.c",400,b,NULL);
  swprintf(cmdline,1200,L"bcgui.exe %ls \"%ls\" \"%ls\"",mergeMode?L"merge":L"text",a,b);
  if(browseMode||findMode||mftMode)wcscpy(cmdline,L"bcgui.exe");
+ if(pvMode){wchar_t fa[400],fb[400];GetFullPathNameW(L"fp\\a",400,fa,NULL);GetFullPathNameW(L"fp\\b",400,fb,NULL);swprintf(cmdline,1200,L"bcgui.exe folder \"%ls\" \"%ls\"",fa,fb);}
  if(folderMode){wchar_t fa[400],fb[400];GetFullPathNameW(L"fc\\a",400,fa,NULL);GetFullPathNameW(L"fc\\b",400,fb,NULL);swprintf(cmdline,1200,L"bcgui.exe folder \"%ls\" \"%ls\"",fa,fb);}
  if(fmergeMode){
   wchar_t l[400],r[400],bs[400],o[400];fmergeFixture();

@@ -1031,6 +1031,16 @@ tv_layout:
     mov ecx, 26
     call scl
     mov r15d, eax
+    ; embedded (the preview of a folder compare): no toolbar, the panes take the whole view
+    invoke GetWindowLongPtrW, rsi, GWLP_USERDATA
+    test rax, rax
+    jz .normal
+    cmp qword [rax+SS_EMBED], 0
+    je .normal
+    xor r13d, r13d
+    mov ebp, [rsp+108]
+    jmp .h
+.normal:
     mov edx, [rsp+104]
     invoke pb_layout, rsi, rdx, r14
     mov r13d, eax
@@ -1252,6 +1262,8 @@ tv_proc:
     je .saveall
     cmp edi, BC_THEME
     je .theme
+    cmp edi, BC_TVQ
+    je .tvq
     cmp edi, WM_APP+50
     je .redraw
     cmp edi, WM_CTLCOLOREDIT
@@ -1358,6 +1370,19 @@ tv_proc:
 .run:
     invoke text_compare, rsi, r15, r14
     jmp .zero
+.tvq:
+    cmp r12d, 1
+    je .tq1
+    cmp r12d, 2
+    je .tq2
+    mov rax, [r15+TV_NBLK]           ; number of differences
+    EPILOG 320
+.tq1:
+    mov rax, [r15+TV_LASTP]          ; the pane that had the caret last
+    EPILOG 320
+.tq2:
+    mov rax, [r15+TV_CUR]
+    EPILOG 320
 .redraw:
     mov qword [r15+TV_PEND], 0
     invoke tv_redraw_aux, r15
