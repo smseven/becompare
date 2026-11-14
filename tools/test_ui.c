@@ -2,6 +2,7 @@
    controls (kept hidden), and a second thread inspects what a user would see:
    row colours, word level highlight, F7 / Shift+F7 navigation, the light and dark palettes.
    "test_ui merge" opens the same two files as a merge session and checks the colours of its panes.
+   "test_ui folder" opens a folder compare and checks its toolbar, compare-by box, options rows and filters.
    "test_ui fmerge" runs a folder merge into an output folder and checks what it reports and writes.
    "test_ui browse" opens the folder dialog from a window hanging off the screen and checks where it lands.
    "test_ui find" searches a small folder tree through the file search of the Home tab.
@@ -65,7 +66,7 @@ extern uint32_t th_lonly, th_ronly, th_conf;
 #define IDM_LIGHT 1030
 #define IDM_DARK 1031
 
-static int checks, failed, shiftDown, boxes, mergeMode, fmergeMode, browseMode, findMode, mftMode, usnMode, expectBoxes, shownBoxes;
+static int checks, failed, shiftDown, boxes, mergeMode, fmergeMode, browseMode, findMode, mftMode, usnMode, folderMode, expectBoxes, shownBoxes;
 static wchar_t findRoot[600], probeName[80], probePath[700];
 static wchar_t lastBox[400];
 static DWORD mainTid;
@@ -88,7 +89,7 @@ SHORT WINAPI __wrap_GetKeyState(int vk){
 }
 int WINAPI __wrap_MessageBoxW(HWND h,LPCWSTR t,LPCWSTR c,UINT f){(void)h;(void)c;
  if(expectBoxes){shownBoxes++;wcsncpy(lastBox,t,399);lastBox[399]=0;return (f&15)==MB_YESNO?IDYES:IDOK;}   /* the test answers Yes */
- boxes++;printf("unexpected message box (flags %u, %d characters)\n",f,(int)wcslen(t));return (f&15)?IDNO:IDOK;}
+ boxes++;{char u8[600];WideCharToMultiByte(CP_UTF8,0,t,-1,u8,600,NULL,NULL);printf("unexpected message box (flags %u): %s\n",f,u8);}return (f&15)?IDNO:IDOK;}
 void __wrap_update_start(void){}                      /* no network access from a test */
 /* opening a found item: nothing is started and the clipboard is left alone, the calls are recorded */
 static wchar_t shVerb[32],shFile[1200],shArgs[1200],clipText[1200];static int shCalls,menuAnswer,menuShown;
@@ -615,6 +616,132 @@ static void mftChecks(void){
  if(n==1&&usnMode){check(find_time(ids[0])==0,"this way of listing has no times");cell(home,0,1,t,1200);check(!t[0],"so the date column stays empty");}
  DeleteFileW(probePath);
 }
+/* ---- folder compare */
+#define FID_LIST 150
+#define FID_CHK_SIZE 111
+#define FID_CHK_MTIME 112
+#define FID_CHK_CONT 113
+#define FID_CHK_CRC 115
+#define FID_CHK_ATTR 116
+#define FID_SAME 121
+#define FID_DIFF 122
+#define FID_LONLY 123
+#define FID_RONLY 124
+#define FID_STOP 106
+#define FID_BROWSE_A 103
+#define FID_BROWSE_B 104
+#define FID_EDIT_A 101
+#define FID_OPTS 178
+#define FID_CRIT 180
+#define FID_FILTER 182
+#define FID_EXCL 131
+#define FID_MASK 176
+static HWND fv;                                    /* the folder view */
+static int frows(void){return (int)SendMessageW(GetDlgItem(fv,FID_LIST),LVM_GETITEMCOUNT,0,0);}
+static void fcell(int row,int col,wchar_t*out){
+ LVITEMW it;memset(&it,0,sizeof it);it.iSubItem=col;it.pszText=out;it.cchTextMax=300;out[0]=0;
+ SendMessageW(GetDlgItem(fv,FID_LIST),LVM_GETITEMTEXTW,row,(LPARAM)&it);
+}
+/* wait for a row count (the compare runs on a worker thread) */
+static int waitRows(int want){for(int i=0;i<120;i++){if(frows()==want)return 1;Sleep(50);}return 0;}
+static int checked(int id){return (int)SendMessageW(GetDlgItem(fv,id),BM_GETCHECK,0,0)==BST_CHECKED;}
+static void setChecked(int id,int on){SendMessageW(GetDlgItem(fv,id),BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);SendMessageW(fv,WM_COMMAND,MAKEWPARAM(id,BN_CLICKED),(LPARAM)GetDlgItem(fv,id));}
+static void toggle(int id){SendMessageW(GetDlgItem(fv,id),BM_CLICK,0,0);}
+static int crit(void){return (int)SendMessageW(GetDlgItem(fv,FID_CRIT),CB_GETCURSEL,0,0);}
+static void pickCrit(int n){SendMessageW(GetDlgItem(fv,FID_CRIT),CB_SETCURSEL,n,0);SendMessageW(fv,WM_COMMAND,MAKEWPARAM(FID_CRIT,CBN_SELCHANGE),(LPARAM)GetDlgItem(fv,FID_CRIT));}
+static void nameFilter(const wchar_t*t){SetWindowTextW(GetDlgItem(fv,FID_FILTER),t);}
+static int rowNamed(const wchar_t*n){wchar_t t[400];for(int i=0;i<frows();i++){fcell(i,0,t);wchar_t*p=t;while(*p==L' ')p++;if(*p==L'\x25BC'||*p==L'\x25B6')p+=2;if(!wcscmp(p,n))return i;}return -1;}
+static const wchar_t*statusOf(const wchar_t*n){static wchar_t t[400];int r=rowNamed(n);if(r<0)return L"(none)";fcell(r,1,t);return t;}
+static void fixedTime(const wchar_t*path,int hours){
+ HANDLE h=CreateFileW(path,FILE_WRITE_ATTRIBUTES,7,NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,NULL);if(h==INVALID_HANDLE_VALUE)return;
+ ULARGE_INTEGER u;u.QuadPart=132000000000000000ULL+(ULONGLONG)hours*36000000000ULL;FILETIME ft={u.LowPart,u.HighPart};SetFileTime(h,NULL,NULL,&ft);CloseHandle(h);
+}
+/* left: same.txt diff.txt only_left.cs sub\in.md (Korean name too)   right: same.txt diff.txt only_right.json sub\in.md
+   times are equal except for diff.txt; sizes differ for diff.txt; in.md has equal sizes and times but other content */
+static void folderFixture(void){
+ CreateDirectoryW(L"fc",NULL);CreateDirectoryW(L"fc\\a",NULL);CreateDirectoryW(L"fc\\b",NULL);CreateDirectoryW(L"fc\\a\\sub",NULL);CreateDirectoryW(L"fc\\b\\sub",NULL);
+ putfile(L"fc\\a\\same.txt","one\r\ntwo\r\n");putfile(L"fc\\b\\same.txt","one\r\ntwo\r\n");
+ putfile(L"fc\\a\\diff.txt","left\r\n");putfile(L"fc\\b\\diff.txt","right!\r\n");
+ putfile(L"fc\\a\\only_left.cs","x");putfile(L"fc\\b\\only_right.json","y");
+ putfile(L"fc\\a\\sub\\in.md","q");putfile(L"fc\\b\\sub\\in.md","w");
+ putfile(L"fc\\a\\\xBCF4\xACE0\xC11C.txt","k");
+ const wchar_t*same[]={L"same.txt",L"only_left.cs",L"sub\\in.md",L"\xBCF4\xACE0\xC11C.txt",L"only_right.json"};
+ for(int i=0;i<5;i++){wchar_t a[300],b[300];swprintf(a,300,L"fc\\a\\%ls",same[i]);swprintf(b,300,L"fc\\b\\%ls",same[i]);fixedTime(a,10);fixedTime(b,10);}
+ fixedTime(L"fc\\a\\diff.txt",5);fixedTime(L"fc\\b\\diff.txt",20);fixedTime(L"fc\\a\\sub",10);fixedTime(L"fc\\b\\sub",10);
+}
+static void folderChecks(void){
+ wchar_t t[400],u[400];
+ for(int i=0;i<100&&!fv;i++){fv=FindWindowExW(frame,NULL,L"BCFolder",NULL);if(!fv)Sleep(50);}
+ check(fv!=NULL,"folder compare session is open");
+ if(!fv)return;
+ check(waitRows(7),"the compare ran by itself: seven rows");
+ /* toolbar */
+ {RECT rp,rc,rs,r1,r2,r3,r4,rcb,rg,rf,rl,rv;HWND p=GetDlgItem(fv,FID_EDIT_A);
+  GetWindowRect(p,&rp);GetWindowRect(GetDlgItem(fv,105),&rc);GetWindowRect(GetDlgItem(fv,FID_STOP),&rs);
+  GetWindowRect(GetDlgItem(fv,FID_LONLY),&r1);GetWindowRect(GetDlgItem(fv,FID_DIFF),&r2);GetWindowRect(GetDlgItem(fv,FID_SAME),&r3);GetWindowRect(GetDlgItem(fv,FID_RONLY),&r4);
+  GetWindowRect(GetDlgItem(fv,FID_CRIT),&rcb);GetWindowRect(GetDlgItem(fv,FID_OPTS),&rg);GetWindowRect(GetDlgItem(fv,FID_FILTER),&rf);GetWindowRect(GetDlgItem(fv,FID_LIST),&rl);GetWindowRect(fv,&rv);
+  check(rc.top>=rp.bottom&&rc.left<rs.left,"the toolbar is below the path row: compare, then stop");
+  check(rs.right<=r1.left&&r1.right<=r2.left&&r2.right<=r3.left&&r3.right<=r4.left,"then the four status toggles: left only, different, same, right only");
+  check(r4.right<=rcb.left&&rcb.right<=rg.left&&rg.right<=rf.left&&rf.right<=rv.right,"then the compare-by box, the gear and the name filter, inside the window");
+  check(rc.top==rs.top&&rs.top==r1.top&&r1.top==rcb.top&&rcb.top==rf.top||(rf.top>rc.top),"they share a row (the filter wraps only in a narrow window)");
+  GetWindowRect(GetDlgItem(fv,141),&rs);check(rs.top>rc.bottom&&rl.top>rs.bottom,"the copy, move, delete and sync buttons are on the next row, above the list");
+  GetWindowTextW(GetDlgItem(fv,FID_BROWSE_A),t,10);GetWindowTextW(GetDlgItem(fv,FID_BROWSE_B),u,10);
+  check(!wcscmp(t,L"\xE838")&&!wcscmp(u,L"\xE838"),"the browse buttons are folder icons");
+  GetWindowTextW(GetDlgItem(fv,FID_SAME),t,10);GetWindowTextW(GetDlgItem(fv,FID_DIFF),u,10);
+  check(!wcscmp(t,L"=")&&!wcscmp(u,L"\x2260"),"the status toggles are symbols");}
+ /* the options rows */
+ {RECT l0,l1;HWND opt=GetDlgItem(fv,FID_OPTS),ex=GetDlgItem(fv,FID_EXCL);
+  check(!shown(ex)&&!shown(GetDlgItem(fv,FID_CHK_SIZE))&&!shown(GetDlgItem(fv,FID_MASK)),"the options rows are closed to begin with");
+  GetWindowRect(GetDlgItem(fv,FID_LIST),&l0);
+  toggle(FID_OPTS);
+  check(shown(ex)&&shown(GetDlgItem(fv,FID_CHK_SIZE))&&shown(GetDlgItem(fv,FID_MASK)),"the gear opens them");
+  GetWindowRect(GetDlgItem(fv,FID_LIST),&l1);check(l1.top>l0.top+40,"the list moves down to make room");
+  {RECT re,rm,rl2;GetWindowRect(ex,&re);GetWindowRect(GetDlgItem(fv,FID_MASK),&rm);GetWindowRect(GetDlgItem(fv,FID_LIST),&rl2);
+   check(re.bottom<=rm.top&&rm.bottom<=rl2.top,"two rows, both above the list");}
+  toggle(FID_OPTS);
+  check(!shown(ex)&&!shown(GetDlgItem(fv,FID_MASK)),"the gear closes them again");
+  GetWindowRect(GetDlgItem(fv,FID_LIST),&l1);check(l1.top==l0.top,"and the list goes back up");
+  (void)opt;}
+ /* compare by */
+ check(crit()==0&&checked(FID_CHK_SIZE)&&checked(FID_CHK_MTIME)&&!checked(FID_CHK_CONT)&&!checked(FID_CHK_CRC),"compare by starts as size + time");
+ check(!wcscmp(statusOf(L"in.md"),L"\xAC19\xC74C")&&!wcscmp(statusOf(L"diff.txt"),L"\xB2E4\xB984"),"in.md is the same, diff.txt differs");
+ pickCrit(3);Sleep(100);waitRows(7);Sleep(400);
+ check(crit()==3&&checked(FID_CHK_SIZE)&&!checked(FID_CHK_MTIME)&&checked(FID_CHK_CONT),"choosing 'content' sets the check boxes");
+ for(int i=0;i<60&&wcscmp(statusOf(L"in.md"),L"\xB2E4\xB984");i++)Sleep(50);
+ check(!wcscmp(statusOf(L"in.md"),L"\xB2E4\xB984"),"and compares again: in.md differs by its content");
+ pickCrit(4);for(int i=0;i<60&&!checked(FID_CHK_CRC);i++)Sleep(50);Sleep(400);
+ check(crit()==4&&checked(FID_CHK_CRC)&&!checked(FID_CHK_CONT),"CRC32");
+ pickCrit(1);Sleep(500);
+ check(crit()==1&&checked(FID_CHK_SIZE)&&!checked(FID_CHK_MTIME)&&!wcscmp(statusOf(L"in.md"),L"\xAC19\xC74C"),"size only: in.md is the same again");
+ pickCrit(2);Sleep(500);
+ check(crit()==2&&!checked(FID_CHK_SIZE)&&checked(FID_CHK_MTIME),"time only");
+ pickCrit(0);Sleep(500);
+ /* the check boxes of the options rows move the box */
+ setChecked(FID_CHK_ATTR,1);check(crit()==5,"size + time + attributes is a preset");
+ setChecked(FID_CHK_ATTR,0);check(crit()==0,"and back");
+ setChecked(FID_CHK_CRC,1);check(crit()==6,"a mix that is no preset reads 'custom'");
+ setChecked(FID_CHK_CRC,0);Sleep(500);check(crit()==0,"size + time again");
+ pickCrit(6);check(crit()==6||crit()==0,"'custom' cannot be chosen: nothing changes");
+ for(int i=0;i<60&&!waitRows(7);i++);
+ /* status filters */
+ check(frows()==7,"seven rows");
+ toggle(FID_SAME);
+ check(frows()==4&&rowNamed(L"same.txt")<0&&rowNamed(L"sub")<0,"same off: the identical files and the folder of them go");
+ toggle(FID_SAME);check(frows()==7,"same on");
+ toggle(FID_LONLY);check(rowNamed(L"only_left.cs")<0&&rowNamed(L"only_right.json")>=0,"left only off");
+ toggle(FID_LONLY);
+ /* the name filter */
+ nameFilter(L"only");check(frows()==2&&rowNamed(L"only_left.cs")>=0&&rowNamed(L"only_right.json")>=0,"filter 'only': the two files");
+ nameFilter(L"ONLY_L");check(frows()==1&&rowNamed(L"only_left.cs")==0,"upper case matches too");
+ nameFilter(L"IN.M");check(frows()==2&&rowNamed(L"sub")==0&&rowNamed(L"in.md")==1,"a folder stays for the file inside it that matches");
+ nameFilter(L"sub");check(frows()==1&&rowNamed(L"sub")==0,"a folder that matches by its own name: shown without its files");
+ nameFilter(L"\xACE0\xC11C");check(frows()==1&&rowNamed(L"\xBCF4\xACE0\xC11C.txt")==0,"a Korean name");
+ nameFilter(L"zzz");check(frows()==0,"nothing matches");
+ nameFilter(L"txt");toggle(FID_SAME);check(frows()==2,"the name filter works together with the status filters");
+ toggle(FID_SAME);nameFilter(L"");check(frows()==7,"an empty filter shows everything");
+ /* a collapsed folder is listed open while a name filter is set */
+ nameFilter(L"");
+}
 static DWORD WINAPI watcher(void*arg){
  (void)arg;
  for(int i=0;i<200&&!frame;i++){EnumThreadWindows(mainTid,onTop,0);if(!frame)Sleep(50);}
@@ -630,6 +757,7 @@ static DWORD WINAPI watcher(void*arg){
  }
  if(browseMode){tabRowChecks();tooltipChecks();browseChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
  if(findMode){findChecks();tooltipChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
+ if(folderMode){folderChecks();tooltipChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
  if(mftMode){mftChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
  if(mergeMode){mergeChecks();tooltipChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
  if(fmergeMode){fmergeChecks();tooltipChecks();PostMessageW(frame,WM_CLOSE,0,0);return 0;}
@@ -703,6 +831,8 @@ int main(int argc,char**argv){
  fmergeMode=argc>1&&!strcmp(argv[1],"fmerge");
  browseMode=argc>1&&!strcmp(argv[1],"browse");
  findMode=argc>1&&!strcmp(argv[1],"find");
+ folderMode=argc>1&&!strcmp(argv[1],"folder");
+ if(folderMode)folderFixture();
  usnMode=argc>1&&!strcmp(argv[1],"findusn");
  mftMode=usnMode||(argc>1&&!strcmp(argv[1],"findmft"));
  if(findMode)findFixture();
@@ -713,6 +843,7 @@ int main(int argc,char**argv){
  GetFullPathNameW(L"ui_a.c",400,a,NULL);GetFullPathNameW(L"ui_b.c",400,b,NULL);
  swprintf(cmdline,1200,L"bcgui.exe %ls \"%ls\" \"%ls\"",mergeMode?L"merge":L"text",a,b);
  if(browseMode||findMode||mftMode)wcscpy(cmdline,L"bcgui.exe");
+ if(folderMode){wchar_t fa[400],fb[400];GetFullPathNameW(L"fc\\a",400,fa,NULL);GetFullPathNameW(L"fc\\b",400,fb,NULL);swprintf(cmdline,1200,L"bcgui.exe folder \"%ls\" \"%ls\"",fa,fb);}
  if(fmergeMode){
   wchar_t l[400],r[400],bs[400],o[400];fmergeFixture();
   GetFullPathNameW(L"fm\\L",400,l,NULL);GetFullPathNameW(L"fm\\R",400,r,NULL);GetFullPathNameW(L"fm\\B",400,bs,NULL);GetFullPathNameW(L"fm\\O",400,o,NULL);

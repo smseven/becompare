@@ -39,6 +39,82 @@ trim_slash:
 .d:
     EPILOG 64
 
+; glyph_only(parent, id, glyph): the button shows an icon of the Segoe MDL2 font (its tooltip is set elsewhere)
+glyph_only:
+    PROLOG 64
+    mov rbx, r8
+    invoke GetDlgItem, rcx, rdx
+    mov rsi, rax
+    test rax, rax
+    jz .d
+    invoke SetWindowTextW, rsi, rbx
+    invoke SendMessageW, rsi, WM_SETFONT, [g_iconfont], 1
+.d:
+    EPILOG 64
+
+; fold_crit_sync(hwnd): the compare-by box shows the preset that the check boxes add up to, or "custom"
+fold_crit_sync:
+    PROLOG 64
+    mov rsi, rcx
+    xor edi, edi
+    invoke get_chk, rsi, ID_CHK_SIZE
+    or edi, eax
+    invoke get_chk, rsi, ID_CHK_MTIME
+    shl eax, 1
+    or edi, eax
+    invoke get_chk, rsi, ID_CHK_CONT
+    shl eax, 2
+    or edi, eax
+    invoke get_chk, rsi, ID_CHK_CRC
+    shl eax, 3
+    or edi, eax
+    invoke get_chk, rsi, ID_CHK_ATTR
+    shl eax, 4
+    or edi, eax
+    xor ebx, ebx
+.l:
+    cmp ebx, CR_N
+    jae .set
+    lea rax, [cr_masks]
+    cmp [rax+rbx*4], edi
+    je .set
+    inc ebx
+    jmp .l
+.set:
+    invoke GetDlgItem, rsi, ID_CRIT
+    invoke SendMessageW, rax, CB_SETCURSEL, rbx, 0
+    EPILOG 64
+
+; fold_crit_apply(hwnd, preset): the check boxes of a preset of the compare-by box
+fold_crit_apply:
+    PROLOG 64
+    mov rsi, rcx
+    cmp edx, CR_N
+    jae .d
+    lea rax, [cr_masks]
+    mov edi, [rax+rdx*4]
+    mov r8d, edi
+    and r8d, 1
+    invoke set_chk_id, rsi, ID_CHK_SIZE, r8
+    mov r8d, edi
+    shr r8d, 1
+    and r8d, 1
+    invoke set_chk_id, rsi, ID_CHK_MTIME, r8
+    mov r8d, edi
+    shr r8d, 2
+    and r8d, 1
+    invoke set_chk_id, rsi, ID_CHK_CONT, r8
+    mov r8d, edi
+    shr r8d, 3
+    and r8d, 1
+    invoke set_chk_id, rsi, ID_CHK_CRC, r8
+    mov r8d, edi
+    shr r8d, 4
+    and r8d, 1
+    invoke set_chk_id, rsi, ID_CHK_ATTR, r8
+.d:
+    EPILOG 64
+
 ; fold_free_ents(fold)
 fold_free_ents:
     PROLOG 64
@@ -58,45 +134,154 @@ fold_free_ents:
     mov qword [rbx+F_NVIS], 0
     EPILOG 64
 
-; fold_rebuild(fold): recompute the visible row list (filter + collapsed folders)
-fold_rebuild:
+; fold_namehas(entry, text (lower case), length) -> eax 1 when the name of the entry contains the text
+fold_namehas:
     PROLOG 64
+    mov rsi, rcx
+    mov rdi, rdx
+    mov r12d, r8d
+    mov rax, [rsi+E_NAME]
+    mov ecx, [rsi+E_NAMEOFF]
+    lea r13, [rax+rcx*2]
+    xor r14d, r14d
+.nl:
+    cmp word [r13+r14*2], 0
+    je .nld
+    inc r14d
+    jmp .nl
+.nld:
+    sub r14d, r12d                   ; last position the text can start at
+    js .no
+    xor r15d, r15d
+.st:
+    cmp r15d, r14d
+    ja .no
+    xor ebx, ebx
+.cm:
+    cmp ebx, r12d
+    jae .yes
+    lea rax, [r15+rbx]
+    movzx ecx, word [r13+rax*2]
+    cmp ecx, 'A'
+    jb .cmp
+    cmp ecx, 'Z'
+    ja .hi
+    add ecx, 32
+    jmp .cmp
+.hi:
+    cmp ecx, 0x80
+    jb .cmp
+    invoke CharLowerW, rcx           ; a character: the high word of the argument is zero
+    mov ecx, eax
+.cmp:
+    cmp cx, [rdi+rbx*2]
+    jne .sn
+    inc ebx
+    jmp .cm
+.sn:
+    inc r15d
+    jmp .st
+.yes:
+    mov eax, 1
+    EPILOG 64
+.no:
+    xor eax, eax
+    EPILOG 64
+
+; fold_rebuild(fold): recompute the visible row list (status filter, name filter, collapsed folders)
+;   A folder stays while its own name or a file below it matches the name filter; while a name filter is
+;   set, collapsed folders are listed open.
+%define RB_FLT 96                    ; wchar[100]: the name filter, lower case
+%define RB_FLN 296                   ; its length
+fold_rebuild:
+    PROLOG 320
     mov rbx, rcx
+    mov word [rsp+RB_FLT], 0
+    invoke GetDlgItem, [rbx+F_HVIEW], ID_FILTER
+    test rax, rax
+    jz .nof
+    invoke GetWindowTextW, rax, &rsp+RB_FLT, 99
+.nof:
+    invoke wcslen, &rsp+RB_FLT
+    mov [rsp+RB_FLN], rax
+    test rax, rax
+    jz .nolow
+    invoke CharLowerBuffW, &rsp+RB_FLT, rax
+.nolow:
     mov rax, [rbx+F_NENT]
     lea rdx, [rax*4+8]
     invoke realloc, [rbx+F_VIS], rdx
     mov [rbx+F_VIS], rax
     mov rsi, rax
     xor edi, edi                     ; n
-    xor ecx, ecx                     ; i
-    mov r8d, [rbx+F_FMASK]
-    mov r9, [rbx+F_ENTS]
+    xor r12d, r12d                   ; i
+    mov r13d, [rbx+F_FMASK]
+    mov r14, [rbx+F_ENTS]
 .l:
-    cmp rcx, [rbx+F_NENT]
+    cmp r12, [rbx+F_NENT]
     jae .done
-    mov rax, rcx
+    mov rax, r12
     shl rax, 6
-    add rax, r9
-    mov edx, [rax+E_MASK]
-    test edx, r8d
+    add rax, r14
+    mov r15, rax                     ; entry
+    mov edx, [r15+E_MASK]
+    test edx, r13d
     jnz .vis
-    mov ecx, [rax+E_SUBEND]
+    mov r12d, [r15+E_SUBEND]
     jmp .l
 .vis:
-    mov [rsi+rdi*4], ecx
+    cmp qword [rsp+RB_FLN], 0
+    je .add
+    test dword [r15+E_FLAGS], EF_DIRA|EF_DIRB
+    jz .file
+    invoke fold_namehas, r15, &rsp+RB_FLT, [rsp+RB_FLN]
+    test eax, eax
+    jnz .add
+    lea rbp, [r12+1]
+.sub:
+    mov eax, [r15+E_SUBEND]
+    cmp rbp, rax
+    jae .nosub
+    mov rcx, rbp
+    shl rcx, 6
+    add rcx, r14
+    mov edx, [rcx+E_MASK]
+    test edx, r13d
+    jz .subn
+    test dword [rcx+E_FLAGS], EF_DIRA|EF_DIRB
+    jnz .subn
+    invoke fold_namehas, rcx, &rsp+RB_FLT, [rsp+RB_FLN]
+    test eax, eax
+    jnz .add
+.subn:
+    inc rbp
+    jmp .sub
+.nosub:
+    mov r12d, [r15+E_SUBEND]         ; nothing below matches: the whole folder goes
+    jmp .l
+.file:
+    invoke fold_namehas, r15, &rsp+RB_FLT, [rsp+RB_FLN]
+    test eax, eax
+    jnz .add
+    inc r12
+    jmp .l
+.add:
+    mov [rsi+rdi*4], r12d
     inc rdi
-    test dword [rax+E_FLAGS], EF_COLL
+    cmp qword [rsp+RB_FLN], 0
+    jne .next
+    test dword [r15+E_FLAGS], EF_COLL
     jz .next
-    test dword [rax+E_FLAGS], EF_DIRA|EF_DIRB
+    test dword [r15+E_FLAGS], EF_DIRA|EF_DIRB
     jz .next
-    mov ecx, [rax+E_SUBEND]
+    mov r12d, [r15+E_SUBEND]
     jmp .l
 .next:
-    inc rcx
+    inc r12
     jmp .l
 .done:
     mov [rbx+F_NVIS], rdi
-    EPILOG 64
+    EPILOG 320
 
 ; fold_refresh(fold): rebuild + push the new count into the list view
 fold_refresh:
@@ -1786,7 +1971,47 @@ fold_report_path:
     add r12d, r14d
 %endmacro
 
-; fold_layout(hwnd)
+%macro PLACEH 3                      ; like PLACE; the height of a combo box includes its drop-down list
+    mov ecx, %2
+    call scl
+    mov ebx, eax
+    cmp r12d, r14d
+    je %%fit
+    lea eax, [r12+rbx]
+    cmp eax, [rsp+104]
+    jbe %%fit
+    mov r12d, r14d
+    lea r13d, [r13+r15]
+    add r13d, r14d
+%%fit:
+    mov ecx, %3
+    call scl
+    mov [rsp+136], rax
+    MVID rsi, %1, r12, r13, rbx, [rsp+136]
+    lea r12d, [r12+rbx]
+    add r12d, r14d
+%endmacro
+
+%macro SEP 0                         ; a little more room between two groups of buttons
+    add r12d, r14d
+    add r12d, r14d
+%endmacro
+
+%macro PANEL 2                       ; a control of the options row: placed while the row is open, hidden otherwise
+    cmp qword [rsp+128], 0
+    je %%hide
+    PLACE %1, %2
+    invoke GetDlgItem, rsi, %1
+    invoke ShowWindow, rax, 5
+    jmp %%done
+%%hide:
+    invoke GetDlgItem, rsi, %1
+    invoke ShowWindow, rax, 0
+%%done:
+%endmacro
+
+; fold_layout(hwnd): path row, then a toolbar of two rows - what to compare and what to show, what to do
+; with the selection - and, when the gear button is pressed, the two rows of less used options
 fold_layout:
     PROLOG 192
     mov rsi, rcx
@@ -1797,59 +2022,108 @@ fold_layout:
     mov ecx, 26
     call scl
     mov r15d, eax                    ; row height
+    invoke get_chk, rsi, ID_BTN_OPTS
+    mov [rsp+128], rax               ; the options rows are open
     mov edx, [rsp+104]               ; client width
     invoke pb_layout, rsi, rdx, r14
-    mov r13d, eax                    ; y of row 2
+    mov r13d, eax                    ; y of the toolbar
     mov r12d, r14d
     PLACE ID_COMPARE, 96
-    PLACE ID_STOP, 60
-    PLACE ID_CHK_SIZE, 60
-    PLACE ID_CHK_MTIME, 90
-    PLACE ID_CHK_CONT, 110
-    PLACE ID_CHK_LINKS, 110
-    PLACE ID_CHK_CRC, 70
-    PLACE ID_CHK_ATTR, 60
-    PLACE ID_LBL_EXCL, 40
-    PLACE ID_EDIT_EXCL, 240
-    PLACE ID_BTN_EXCL, 84
+    PLACE ID_STOP, 34
+    SEP
+    PLACE ID_CHK_LONLY, 36
+    PLACE ID_CHK_DIFF, 36
+    PLACE ID_CHK_SAME, 36
+    PLACE ID_CHK_RONLY, 36
+    SEP
+    PLACE ID_LBL_CRIT, 76
+    PLACEH ID_CRIT, 190, 240
+    PLACE ID_BTN_OPTS, 40
+    ; the name filter at the right end of this row; on a row of its own when the window is too narrow
+    mov ecx, 52
+    call scl
+    mov [rsp+144], rax               ; label width
+    mov ecx, 200
+    call scl
+    mov [rsp+152], rax               ; field width
+    mov eax, [rsp+104]
+    sub eax, r14d
+    sub eax, [rsp+152]
+    mov [rsp+160], rax               ; x of the field
+    sub eax, r14d
+    sub eax, [rsp+144]               ; x of the label
+    cmp eax, r12d
+    jge .fgo
+    mov r12d, r14d                   ; no room: a new row, from the left
     lea r13d, [r13+r15]
-    add r13d, r14d                   ; y of row 3
+    add r13d, r14d
+    mov eax, r12d
+    add eax, [rsp+144]
+    add eax, r14d
+    mov [rsp+160], rax
+    mov eax, r12d
+.fgo:
+    mov [rsp+168], rax               ; x of the label (rax does not survive the call that finds the control)
+    MVID rsi, ID_LBL_FILTER, [rsp+168], r13, [rsp+144], r15
+    MVID rsi, ID_FILTER, [rsp+160], r13, [rsp+152], r15
+    ; what to do with the selection
+    lea r13d, [r13+r15]
+    add r13d, r14d
     mov r12d, r14d
-    PLACE ID_CHK_SAME, 64
-    PLACE ID_CHK_DIFF, 64
-    PLACE ID_CHK_LONLY, 76
-    PLACE ID_CHK_RONLY, 90
-    PLACE ID_BTN_COPYLR, 56
-    PLACE ID_BTN_COPYRL, 56
-    PLACE ID_BTN_MOVELR, 56
-    PLACE ID_BTN_MOVERL, 56
-    PLACE ID_BTN_STAMPLR, 150
-    PLACE ID_BTN_STAMPRL, 150
+    PLACE ID_BTN_COPYLR, 40
+    PLACE ID_BTN_COPYRL, 40
+    PLACE ID_BTN_MOVELR, 40
+    PLACE ID_BTN_MOVERL, 40
+    SEP
+    PLACE ID_BTN_STAMPLR, 44
+    PLACE ID_BTN_STAMPRL, 44
+    SEP
     PLACE ID_BTN_DEL, 40
     PLACE ID_BTN_SYNC, 40
     PLACE ID_BTN_PAUSE, 40
+    SEP
     PLACE ID_BTN_REPORT, 96
     PLACE ID_BTN_SNAP, 40
+    SEP
     PLACE ID_BTN_EXPAND, 40
     PLACE ID_BTN_COLLAP, 40
     lea r13d, [r13+r15]
     add r13d, r14d
     mov r12d, r14d
-    PLACE ID_LBL_FSZ, 170
-    PLACE ID_EDIT_FMIN, 70
-    PLACE ID_LBL_FTO, 16
-    PLACE ID_EDIT_FMAX, 70
-    PLACE ID_LBL_FDAY, 130
-    PLACE ID_EDIT_FDAYS, 50
-    PLACE ID_LBL_ATTRX, 190
-    PLACE ID_EDIT_ATTRX, 70
-    PLACE ID_CHK_ASFILE, 250
-    PLACE ID_CHK_ACL, 220
-    PLACE ID_CHK_LOOSE, 270
-    PLACE ID_LBL_MASK, 170
-    PLACE ID_EDIT_MASK, 200
+    ; the options rows
+    PANEL ID_CHK_SIZE, 60
+    PANEL ID_CHK_MTIME, 90
+    PANEL ID_CHK_CONT, 110
+    PANEL ID_CHK_LINKS, 110
+    PANEL ID_CHK_CRC, 70
+    PANEL ID_CHK_ATTR, 60
+    PANEL ID_LBL_EXCL, 40
+    PANEL ID_EDIT_EXCL, 240
+    PANEL ID_BTN_EXCL, 84
+    cmp qword [rsp+128], 0
+    je .norow2
+    lea r13d, [r13+r15]
+    add r13d, r14d
+    mov r12d, r14d
+.norow2:
+    PANEL ID_LBL_FSZ, 170
+    PANEL ID_EDIT_FMIN, 70
+    PANEL ID_LBL_FTO, 16
+    PANEL ID_EDIT_FMAX, 70
+    PANEL ID_LBL_FDAY, 130
+    PANEL ID_EDIT_FDAYS, 50
+    PANEL ID_LBL_ATTRX, 190
+    PANEL ID_EDIT_ATTRX, 70
+    PANEL ID_CHK_ASFILE, 250
+    PANEL ID_CHK_ACL, 220
+    PANEL ID_CHK_LOOSE, 270
+    PANEL ID_LBL_MASK, 170
+    PANEL ID_EDIT_MASK, 200
+    cmp qword [rsp+128], 0
+    je .norow3
     lea r13d, [r13+r15]
     add r13d, r14d                   ; y of the list
+.norow3:
     mov ebp, [rsp+108]
     sub ebp, r13d
     jns .h
@@ -1930,6 +2204,8 @@ fold_proc:
     invoke malloc, 65536
     mov [r15+F_BUFB], rax
     invoke pb_create, rsi
+    invoke glyph_only, rsi, ID_BROWSE_A, &g_foldopen        ; a folder icon instead of the dots
+    invoke glyph_only, rsi, ID_BROWSE_B, &g_foldopen
     invoke mk_btn, rsi, &s_stop, ID_STOP
     invoke mk_chk, rsi, &s_c_size, ID_CHK_SIZE, 1
     invoke mk_chk, rsi, &s_c_mtime, ID_CHK_MTIME, 1
@@ -1992,6 +2268,30 @@ fold_proc:
     invoke icon_set, rsi, ID_BTN_SNAP, &g_snap, &s_b_snap
     invoke icon_set, rsi, ID_BTN_EXPAND, &g_expand, &s_b_expand
     invoke icon_set, rsi, ID_BTN_COLLAP, &g_collapse, &s_b_collap
+    invoke icon_set, rsi, ID_STOP, &g_stop, &tt_folder_0
+    invoke icon_set, rsi, ID_BTN_STAMPLR, &g_stamplr, &tt_folder_21
+    invoke icon_set, rsi, ID_BTN_STAMPRL, &g_stamprl, &tt_folder_22
+    ; compare-by box, the gear that opens the options rows, the name filter
+    invoke mk_lbl, rsi, &s_l_crit, ID_LBL_CRIT
+    invoke mk, rsi, &cn_combo, &s_empty, CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP, ID_CRIT
+    mov rbx, rax
+    xor ebp, ebp
+.cr:
+    lea rax, [cr_names]
+    mov r13, [rax+rbp*8]
+    invoke SendMessageW, rbx, CB_ADDSTRING, 0, r13
+    inc ebp
+    cmp ebp, CR_N+1
+    jb .cr
+    invoke mk_chk, rsi, &s_empty, ID_BTN_OPTS, 0
+    mov r13, rax
+    invoke GetWindowLongPtrW, r13, -16
+    or eax, 0x1000                   ; BS_PUSHLIKE: a button that stays pressed while the rows are open
+    invoke SetWindowLongPtrW, r13, -16, rax
+    invoke glyph_only, rsi, ID_BTN_OPTS, &g_opts
+    invoke mk_lbl, rsi, &s_l_filter, ID_LBL_FILTER
+    invoke mk_edit, rsi, ID_FILTER
+    invoke SendMessageW, rax, 0x1501, 1, &s_cue_filter      ; EM_SETCUEBANNER
     invoke tips_apply, rsi, &tt_folder
     invoke mk, rsi, &cn_list, 0, LVS_REPORT|LVS_OWNERDATA|LVS_SHOWSELALWAYS|WS_TABSTOP|WS_BORDER, ID_LIST
     mov [r15+F_HLIST], rax
@@ -2025,6 +2325,7 @@ fold_proc:
 .coldone:
     invoke pb_load, rsi, r14
     invoke fold_opts_apply, rsi, r14, r15
+    invoke fold_crit_sync, rsi
     invoke fold_theme, r15
     xor eax, eax
     EPILOG 320
@@ -2059,6 +2360,7 @@ fold_proc:
     jb .btns
     cmp ebx, ID_CHK_ATTR
     ja .nocrit
+    invoke fold_crit_sync, rsi
     cmp qword [r15+F_NENT], 0                ; a changed criterion re-runs the comparison
     je .zero
     jmp .run
@@ -2102,6 +2404,12 @@ fold_proc:
     je .b_pause
     cmp ebx, ID_BTN_EXCL
     je .b_excl
+    cmp ebx, ID_CRIT
+    je .b_crit
+    cmp ebx, ID_BTN_OPTS
+    je .b_opts
+    cmp ebx, ID_FILTER
+    je .b_filter
     jmp .def
 .b_lr:
     invoke fold_copy, rsi, r15, 0
@@ -2144,6 +2452,26 @@ fold_proc:
     jmp .zero
 .b_excl:
     invoke fold_excl_dialog, rsi, r15
+    jmp .zero
+.b_crit:
+    cmp ebp, CBN_SELCHANGE
+    jne .zero
+    invoke GetDlgItem, rsi, ID_CRIT
+    invoke SendMessageW, rax, CB_GETCURSEL, 0, 0
+    cmp eax, CR_N
+    jae .zero                                ; "custom" is only ever shown, never chosen
+    mov edx, eax
+    invoke fold_crit_apply, rsi, rdx
+    cmp qword [r15+F_NENT], 0
+    je .zero
+    jmp .run
+.b_opts:
+    invoke fold_layout, rsi
+    jmp .zero
+.b_filter:
+    cmp ebp, 0x0300                          ; EN_CHANGE: the list follows what is typed
+    jne .zero
+    invoke fold_refresh, r15
     jmp .zero
 
 .run:
@@ -2458,16 +2786,18 @@ WSTR tt_folder_13, "압축 파일 안을 열지 않고 파일 하나로 비교�
 WSTR tt_folder_14, "복사할 때 NTFS 권한(ACL)도 함께 복사합니다"
 WSTR tt_folder_15, "유니코드 표기나 확장자가 조금 달라도 같은 이름으로 짝짓습니다"
 WSTR tt_folder_16, "이름이 다른 파일을 짝짓는 규칙 (예: *.txt=*.bak)"
-WSTR tt_folder_17, "같은 항목을 목록에 표시합니다"
-WSTR tt_folder_18, "다른 항목을 목록에 표시합니다"
-WSTR tt_folder_19, "왼쪽에만 있는 항목을 목록에 표시합니다"
-WSTR tt_folder_20, "오른쪽에만 있는 항목을 목록에 표시합니다"
+WSTR tt_folder_17, "= 같은 항목을 목록에 표시합니다"
+WSTR tt_folder_18, "≠ 다른 항목을 목록에 표시합니다"
+WSTR tt_folder_19, "→ 왼쪽에만 있는 항목을 목록에 표시합니다"
+WSTR tt_folder_20, "← 오른쪽에만 있는 항목을 목록에 표시합니다"
+WSTR tt_folder_24, "무엇이 같은지를 정하는 기준. 아래 옵션 줄의 체크 상자와 같이 움직입니다"
+WSTR tt_folder_25, "덜 쓰는 옵션 줄(제외·크기·기간·속성·마스크 등)을 열고 닫습니다"
+WSTR tt_folder_26, "목록에서 이 글자가 이름에 든 항목만 보여 줍니다 (폴더는 안에 든 파일이 맞을 때만 남습니다)"
 WSTR tt_folder_21, "선택한 항목의 수정 시각과 속성을 왼쪽 값으로 오른쪽에 맞춥니다"
 WSTR tt_folder_22, "선택한 항목의 수정 시각과 속성을 오른쪽 값으로 왼쪽에 맞춥니다"
 WSTR tt_folder_23, "비교 결과를 HTML·엑셀·워드 파일로 내보냅니다"
 align 8
 tt_folder:
-    dq ID_STOP, tt_folder_0
     dq ID_CHK_SIZE, tt_folder_1
     dq ID_CHK_MTIME, tt_folder_2
     dq ID_CHK_CONT, tt_folder_3
@@ -2488,8 +2818,9 @@ tt_folder:
     dq ID_CHK_DIFF, tt_folder_18
     dq ID_CHK_LONLY, tt_folder_19
     dq ID_CHK_RONLY, tt_folder_20
-    dq ID_BTN_STAMPLR, tt_folder_21
-    dq ID_BTN_STAMPRL, tt_folder_22
     dq ID_BTN_REPORT, tt_folder_23
+    dq ID_CRIT, tt_folder_24
+    dq ID_BTN_OPTS, tt_folder_25
+    dq ID_FILTER, tt_folder_26
     dq 0, 0
 section .text

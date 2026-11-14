@@ -25,7 +25,7 @@ extern g_hinst, g_font, g_dark, th_bg, th_fg, th_panel, th_diff, th_lonly, th_ro
 extern th_panelbrush, th_bgbrush
 extern mk, reg_class, scl, set_status, msgbox, browse_save
 extern lv_dark_header, theme_checks, mk_btn, mk_chk, mk_lbl, mk_edit, get_chk, ctl_color, pb_create, pb_layout, pb_load, pb_collect, pb_command
-extern GetWindowTextLengthW, excl_match2, tip_add
+extern GetWindowTextLengthW, excl_match2, tip_add, ShowWindow, CharLowerBuffW, CharLowerW, g_iconfont
 extern vec_push, fmt_size, fmt_time, excl_match, sb_init, sb_append, sb_append_esc, sb_free, write_utf8
 extern NormalizeString, GetNamedSecurityInfoW, SetNamedSecurityInfoW, LocalFree, SetFileAttributesW, SetFileTime, icon_set, g_copyr, g_copyl, g_mover, g_movel, g_del, g_sync, g_pause, g_report, g_snap, g_expand, g_collapse, GetLastError, GetCurrentProcessId, MoveFileW, input_box, wcsncpy, wcstoul, GetSystemTimeAsFileTime, set_status_part, str_dup, add_session, set_tab_title, type_for_path, ext_launch, g_policy
 
@@ -101,6 +101,12 @@ extern g_batch, g_rep_path, g_exitcode, g_hframe, g_snap_path
 %define F_ATTRX   5176
 %define F_SIZE    5472
 %define ID_LBL_ATTRX 168
+%define ID_BTN_OPTS  178             ; opens / closes the row of less used options
+%define ID_LBL_CRIT  179
+%define ID_CRIT      180             ; compare by: size + time, size, time, content, CRC32, ...
+%define ID_LBL_FILTER 181
+%define ID_FILTER    182             ; shows only the names that contain this text
+%define CR_N         6               ; presets of the compare-by box (row 6 is "custom")
 %define ID_CHK_ASFILE 170
 %define ID_CHK_LOOSE 174
 %define ID_LBL_MASK 175
@@ -179,10 +185,28 @@ WSTR s_fto, "~"
 WSTR s_fday, "최근 수정(일 이내):"
 WSTR f_uint, "%u"
 f_filt: dw 0x1F, "%", "u", ",", "%", "u", ",", "%", "u", 0
-WSTR s_f_same, "같음"
-WSTR s_f_diff, "다름"
-WSTR s_f_lonly, "왼쪽만"
-WSTR s_f_ronly, "오른쪽만"
+WSTR s_f_same, "="
+WSTR s_f_diff, "≠"
+WSTR s_f_lonly, "→"
+WSTR s_f_ronly, "←"
+WSTR s_l_crit, "비교 기준:"
+WSTR s_l_filter, "필터:"
+WSTR s_cue_filter, "이름의 일부"
+WSTR s_cr0, "크기 + 수정 시각"
+WSTR s_cr1, "크기"
+WSTR s_cr2, "수정 시각"
+WSTR s_cr3, "내용(바이트)"
+WSTR s_cr4, "CRC32"
+WSTR s_cr5, "크기 + 시각 + 속성"
+WSTR s_cr6, "사용자 지정"
+g_stop:     dw 0xE71A, 0
+g_opts:     dw 0xE713, 0
+g_foldopen: dw 0xE838, 0
+g_stamplr:  dw 0xE916, 0xE72A, 0
+g_stamprl:  dw 0xE72B, 0xE916, 0
+align 8
+cr_names: dq s_cr0, s_cr1, s_cr2, s_cr3, s_cr4, s_cr5, s_cr6
+cr_masks: dd 3, 1, 2, 5, 9, 19      ; size 1, time 2, content 4, CRC32 8, attributes 16
 WSTR s_b_copylr, "→ 복사"
 WSTR s_b_copyrl, "← 복사"
 WSTR s_b_movelr, "→ 이동"
