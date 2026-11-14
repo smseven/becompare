@@ -115,6 +115,233 @@ fold_crit_apply:
 .d:
     EPILOG 64
 
+; fold_glyph(entry) -> eax what the middle column shows: 0 nothing, 1 -> (copy to the right), 2 <- (copy to the
+;   left), 3 not equal and no action, 4 equal, 5 skip. An action chosen by the user (bits 26..28 of the flags:
+;   1 right, 2 left, 3 skip) wins; otherwise a new item goes over to the other side and of two different files
+;   the newer one is copied.
+fold_glyph:
+    mov eax, [rcx+E_STATUS]
+    test eax, eax
+    jz .same
+    cmp eax, ST_TYPE
+    je .ne
+    mov edx, [rcx+E_FLAGS]
+    test edx, EF_ALT
+    jnz .ne
+    shr edx, EF_ACTSH
+    and edx, 7
+    cmp edx, 3
+    je .skip
+    cmp eax, ST_LONLY
+    je .r
+    cmp eax, ST_RONLY
+    je .l
+    ; two different items: a folder has nothing to copy
+    test dword [rcx+E_FLAGS], EF_DIRA|EF_DIRB
+    jnz .ne
+    cmp edx, 1
+    je .r
+    cmp edx, 2
+    je .l
+    mov rax, [rcx+E_MTA]
+    cmp rax, [rcx+E_MTB]
+    je .ne
+    ja .r
+.l:
+    mov eax, 2
+    ret
+.r:
+    mov eax, 1
+    ret
+.ne:
+    mov eax, 3
+    ret
+.same:
+    mov eax, 4
+    ret
+.skip:
+    mov eax, 5
+    ret
+
+; fold_cycle(fold, row): the next action of the item in that row: new and removed items alternate between the
+;   copy and "skip", two different files go through right, left and skip
+fold_cycle:
+    PROLOG 64
+    mov rbx, rcx
+    mov r12, rdx
+    cmp rdx, [rbx+F_NVIS]
+    jae .d
+    invoke fold_ent, rbx, rdx
+    mov rsi, rax
+    mov eax, [rsi+E_STATUS]
+    cmp eax, ST_DIFF
+    je .diff
+    cmp eax, ST_LONLY
+    je .two
+    cmp eax, ST_RONLY
+    jne .d
+.two:
+    mov eax, [rsi+E_FLAGS]
+    shr eax, EF_ACTSH
+    and eax, 7
+    xor edi, edi                     ; copy again
+    cmp eax, 3
+    je .set
+    mov edi, 3                       ; skip
+    jmp .set
+.diff:
+    test dword [rsi+E_FLAGS], EF_DIRA|EF_DIRB
+    jnz .d
+    test dword [rsi+E_FLAGS], EF_ALT
+    jnz .d
+    invoke fold_glyph, rsi
+    mov edi, 1                       ; what is shown now -> the next one
+    cmp eax, 1
+    jne .d2
+    mov edi, 2
+    jmp .set
+.d2:
+    cmp eax, 2
+    jne .set
+    mov edi, 3
+.set:
+    mov eax, [rsi+E_FLAGS]
+    and eax, ~(7 << EF_ACTSH)
+    mov ecx, edi
+    shl ecx, EF_ACTSH
+    or eax, ecx
+    mov [rsi+E_FLAGS], eax
+    invoke SendMessageW, [rbx+F_HLIST], LVM_REDRAWITEMS, r12, r12
+.d:
+    EPILOG 64
+
+; fold_icon(entry) -> eax index in the system icon list of the type of the item (a folder, or by extension);
+;   the answers are kept in a small table: asking the shell for every cell of every repaint would be slow
+%define IC_KEY 96                    ; wchar[16]
+%define IC_PATH 128                  ; wchar[24]
+%define IC_SFI 176                   ; SHFILEINFOW (696) -> 872
+fold_icon:
+    PROLOG 880
+    mov rbx, rcx
+    lea rdi, [rsp+IC_KEY]
+    mov word [rdi], 1                ; folders: the key is the character 1
+    mov word [rdi+2], 0
+    mov r12d, 0x10                   ; FILE_ATTRIBUTE_DIRECTORY
+    test dword [rbx+E_FLAGS], EF_DIRA|EF_DIRB
+    jnz .look
+    mov r12d, 0x80                   ; FILE_ATTRIBUTE_NORMAL
+    mov rax, [rbx+E_NAME]
+    mov ecx, [rbx+E_NAMEOFF]
+    lea rsi, [rax+rcx*2]
+    xor r13d, r13d                   ; the last dot
+.dot:
+    movzx eax, word [rsi]
+    test eax, eax
+    jz .dotd
+    cmp eax, '.'
+    jne .dn
+    mov r13, rsi
+.dn:
+    add rsi, 2
+    jmp .dot
+.dotd:
+    mov word [rdi], 0
+    test r13, r13
+    jz .look
+    lea rsi, [r13+2]
+    xor ecx, ecx
+.ex:
+    movzx eax, word [rsi+rcx*2]
+    test eax, eax
+    jz .exd
+    cmp ecx, 14
+    jae .exd
+    cmp eax, 'A'
+    jb .exs
+    cmp eax, 'Z'
+    ja .exs
+    add eax, 32
+.exs:
+    mov [rdi+rcx*2], ax
+    inc ecx
+    jmp .ex
+.exd:
+    mov word [rdi+rcx*2], 0
+.look:
+    xor r14d, r14d
+.find:
+    cmp r14, [ico_n]
+    jae .miss
+    mov rax, r14
+    shl rax, 5
+    lea rcx, [ico_keys]
+    add rcx, rax
+    xor edx, edx
+.cmp:
+    movzx eax, word [rcx+rdx*2]
+    cmp ax, [rdi+rdx*2]
+    jne .next
+    test eax, eax
+    jz .hit
+    inc edx
+    cmp edx, 16
+    jb .cmp
+.hit:
+    lea rcx, [ico_vals]
+    mov eax, [rcx+r14*4]
+    EPILOG 880
+.next:
+    inc r14
+    jmp .find
+.miss:
+    ; ask the shell about "x.<ext>" (attributes only: the file does not exist)
+    lea rsi, [rsp+IC_PATH]
+    mov word [rsi], 'x'
+    mov word [rsi+2], 0
+    cmp word [rdi], 1
+    je .ask
+    cmp word [rdi], 0
+    je .ask
+    mov word [rsi+2], '.'
+    xor ecx, ecx
+.cp:
+    movzx eax, word [rdi+rcx*2]
+    mov [rsi+rcx*2+4], ax
+    test eax, eax
+    jz .ask
+    inc ecx
+    cmp ecx, 15
+    jb .cp
+    mov word [rsi+rcx*2+4], 0
+.ask:
+    invoke SHGetFileInfoW, rsi, r12, &rsp+IC_SFI, 696, 0x4011      ; USEFILEATTRIBUTES | SYSICONINDEX | SMALLICON
+    mov eax, [rsp+IC_SFI+8]
+    mov r15d, eax
+    mov r14, [ico_n]
+    cmp r14, 256
+    jae .done
+    mov rax, r14
+    shl rax, 5
+    lea rcx, [ico_keys]
+    add rcx, rax
+    xor edx, edx
+.sv:
+    movzx eax, word [rdi+rdx*2]
+    mov [rcx+rdx*2], ax
+    test eax, eax
+    jz .svd
+    inc edx
+    cmp edx, 15
+    jb .sv
+    mov word [rcx+rdx*2], 0
+.svd:
+    lea rcx, [ico_vals]
+    mov [rcx+r14*4], r15d
+    inc qword [ico_n]
+.done:
+    mov eax, r15d
+    EPILOG 880
+
 ; fold_free_ents(fold)
 fold_free_ents:
     PROLOG 64
@@ -737,8 +964,17 @@ fold_cell:
     add rax, [rbx+F_ENTS]
     mov rdi, rax
     mov word [rsi], 0
+    cmp r8d, 8                       ; a column of the list: its kind of cell
+    jae .kind
+    lea rax, [col_kind]
+    mov r8d, [rax+r8*4]
+.kind:
     cmp r8d, 0
     je .name
+    cmp r8d, 9
+    je .name
+    cmp r8d, 10
+    je .out
     cmp r8d, 1
     je .status
     cmp r8d, 2
@@ -797,6 +1033,17 @@ fold_cell:
     invoke _snwprintf, rsi, 40, &f_attrcell, &rsp+96, &rsp+130
     jmp .out
 .name:
+    ; the left name is empty when the item is not on the left, the right name when it is not on the right
+    mov eax, [rdi+E_FLAGS]
+    cmp r8d, 9
+    je .rname
+    test eax, EF_EXA
+    jz .out
+    jmp .nameok
+.rname:
+    test eax, EF_EXB
+    jz .out
+.nameok:
     mov ecx, [rdi+E_DEPTH]
     add ecx, ecx
     cmp ecx, 60
@@ -815,6 +1062,11 @@ fold_cell:
     lea rax, [s_sp2]
     test dword [rdi+E_FLAGS], EF_DIRA|EF_DIRB
     jz .mk
+    cmp r8d, 9
+    jne .mkl
+    test dword [rdi+E_FLAGS], EF_EXA
+    jnz .mk                          ; on both sides: the marker is on the left
+.mkl:
     lea rax, [s_marker_open]
     test dword [rdi+E_FLAGS], EF_COLL
     jz .mk
@@ -843,27 +1095,27 @@ fold_cell:
     mov word [r10], 0
     jmp .out
 .dir:
-    mov eax, [rdi+E_STATUS]
+    invoke fold_glyph, rdi
+    lea r10, [s_empty]
+    cmp eax, 1
+    jne .g2
     lea r10, [s_ar_r]
-    cmp eax, ST_LONLY
-    je .dset
+.g2:
+    cmp eax, 2
+    jne .g3
     lea r10, [s_ar_l]
-    cmp eax, ST_RONLY
-    je .dset
-    lea r10, [s_ar_eq]
-    test eax, eax
-    jz .dset
+.g3:
+    cmp eax, 3
+    jne .g4
     lea r10, [s_ar_ne]
-    cmp eax, ST_DIFF
+.g4:
+    cmp eax, 4
+    jne .g5
+    lea r10, [s_ar_eq]
+.g5:
+    cmp eax, 5
     jne .dset
-    test dword [rdi+E_FLAGS], EF_DIRA|EF_DIRB
-    jnz .dset
-    mov rax, [rdi+E_MTA]
-    cmp rax, [rdi+E_MTB]
-    je .dset
-    lea r10, [s_ar_r]                ; the left file is newer
-    ja .dset
-    lea r10, [s_ar_l]
+    lea r10, [s_ar_skip]
 .dset:
     invoke wcscpy, rsi, r10
     jmp .out
@@ -1382,11 +1634,18 @@ plan_push:
     mov [rax+4], edi
     EPILOG 64
 
-; plan_build(fold, mode 1 update, 2 mirror, 3 two-way)
+; plan_build(fold, mode 1 update, 2 mirror, 3 two-way, 4 the actions shown in the middle column)
+;   Mode 4 is the two-way plan, except for items whose action was chosen by hand.
 plan_build:
     PROLOG 64
     mov r12, rcx
     mov r13d, edx
+    xor r14d, r14d
+    cmp r13d, 4
+    jne .m
+    mov r13d, 3
+    mov r14d, 1
+.m:
     mov qword [r12+F_NPLAN], 0
     xor ebx, ebx
 .l:
@@ -1400,6 +1659,35 @@ plan_build:
     test esi, EF_ALT
     jnz .n
     and esi, EF_DIRA|EF_DIRB         ; nonzero = directory
+    test r14d, r14d
+    jz .nov
+    mov ecx, [rdi+E_FLAGS]
+    shr ecx, EF_ACTSH
+    and ecx, 7
+    jz .nov                          ; nothing chosen: as in the two-way plan
+    cmp ecx, 3
+    je .n                            ; skip
+    mov eax, [rdi+E_STATUS]
+    cmp ecx, 1
+    je .toright
+    cmp eax, ST_RONLY                ; chosen: to the left
+    je .ronly
+    cmp eax, ST_DIFF
+    jne .n
+    test esi, esi
+    jnz .n
+    mov edx, OP_COPYRL
+    jmp .push
+.toright:
+    cmp eax, ST_LONLY
+    je .lonly
+    cmp eax, ST_DIFF
+    jne .n
+    test esi, esi
+    jnz .n
+    mov edx, OP_COPYLR
+    jmp .push
+.nov:
     mov eax, [rdi+E_STATUS]
     cmp eax, ST_LONLY
     je .lonly
@@ -1618,6 +1906,7 @@ fold_sync:
     invoke AppendMenuW, rdi, MF_STRING, 1, &s_sy1
     invoke AppendMenuW, rdi, MF_STRING, 2, &s_sy2
     invoke AppendMenuW, rdi, MF_STRING, 3, &s_sy3
+    invoke AppendMenuW, rdi, MF_STRING, 5, &s_sy5
     invoke AppendMenuW, rdi, MF_SEPARATOR, 0, 0
     mov r8d, MF_STRING
     test dword [rbx+F_OPT], 0x10
@@ -1628,6 +1917,11 @@ fold_sync:
     invoke popup_at, rsi, ID_BTN_SYNC, rdi
     test eax, eax
     jz .d
+    cmp eax, 5
+    jne .not5
+    mov eax, 4                       ; the actions of the middle column
+    jmp .plan
+.not5:
     cmp eax, 4
     jne .plan
     xor dword [rbx+F_OPT], 0x10
@@ -2126,11 +2420,18 @@ fold_layout:
 .norow3:
     mov ebp, [rsp+108]
     sub ebp, r13d
+    sub ebp, r15d                    ; the hint line takes the last row
     jns .h
     xor ebp, ebp
 .h:
     mov ebx, [rsp+104]
     MVID rsi, ID_LIST, 0, r13, rbx, rbp
+    lea eax, [r13+rbp]
+    add eax, r14d
+    mov [rsp+136], rax
+    sub ebx, r14d
+    sub ebx, r14d
+    MVID rsi, ID_LBL_HINT, r14, [rsp+136], rbx, r15
     EPILOG 192
 
 ; ---------------------------------------------------------------- window procedure
@@ -2298,6 +2599,10 @@ fold_proc:
     mov rbx, rax
     invoke SendMessageW, rbx, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT|LVS_EX_DOUBLEBUFFER
     invoke lv_dark_header, rbx
+    invoke SHGetFileInfoW, &s_x, 0x80, &ico_sfi, 696, 0x4011      ; the shell's small icons: the list of the system
+    mov [g_sysil], rax
+    invoke SendMessageW, rbx, LVM_SETIMAGELIST, 1, rax          ; LVSIL_SMALL
+    invoke mk_lbl, rsi, &s_hint, ID_LBL_HINT
     xor ebp, ebp
 .col:
     cmp ebp, 8
@@ -2533,12 +2838,29 @@ fold_proc:
     je .cdraw
     cmp eax, NM_DBLCLK
     je .dbl
+    cmp eax, NM_CLICK
+    je .click
     cmp eax, LVN_KEYDOWN
     je .keydown
     cmp eax, NM_RCLICK
     je .rclick
     jmp .def
 .disp:
+    test dword [r13+DI_MASK], LVIF_IMAGE
+    jz .dtext
+    cmp dword [r13+DI_SUB], 0
+    jne .dtext
+    mov eax, [r13+DI_ITEM]
+    cmp rax, [r15+F_NVIS]
+    jae .dtext
+    invoke fold_ent, r15, rax
+    mov rdi, rax
+    mov dword [r13+DI_IMAGE], -2     ; I_IMAGENONE: nothing on this side
+    test dword [rdi+E_FLAGS], EF_EXA
+    jz .dtext
+    invoke fold_icon, rdi
+    mov [r13+DI_IMAGE], eax
+.dtext:
     test dword [r13+DI_MASK], LVIF_TEXT
     jz .zero
     mov eax, [r13+DI_ITEM]
@@ -2549,14 +2871,20 @@ fold_proc:
     invoke fold_cell, r15, rax, r8, r9
     jmp .zero
 .cdraw:
-    mov eax, [r13+CD_STAGE]
-    cmp eax, CDDS_PREPAINT
+    mov ebx, [r13+CD_STAGE]
+    cmp ebx, CDDS_PREPAINT
     jne .cd2
     mov eax, CDRF_NOTIFYITEMDRAW
     EPILOG 320
 .cd2:
-    cmp eax, CDDS_ITEMPREPAINT
-    jne .zero
+    cmp ebx, CDDS_ITEMPREPAINT
+    je .cdrow
+    cmp ebx, CD_SUBSTATE
+    je .cdrow
+    cmp ebx, CD_SUBPOST
+    je .cdpost
+    jmp .zero
+.cdrow:
     mov rax, [r13+CD_ITEMSPEC]
     cmp rax, [r15+F_NVIS]
     jae .zero
@@ -2564,6 +2892,7 @@ fold_proc:
     mov eax, [rcx+rax*4]
     shl rax, 6
     add rax, [r15+F_ENTS]
+    mov rdi, rax
     mov ecx, [rax+E_STATUS]
     mov edx, [th_bg]
     mov r8d, [th_same]
@@ -2592,9 +2921,73 @@ fold_proc:
 .cset:
     mov [r13+CD_CLRTEXTBK], edx
     mov [r13+CD_CLRTEXT], r8d
+    cmp ebx, CDDS_ITEMPREPAINT
+    jne .cdsub
+    mov eax, CDRF_NOTIFYSUBITEMDRAW  ; the cells of the row are drawn one by one
+    EPILOG 320
+.cdsub:
+    mov eax, [r13+CD_SUBITEM]
+    cmp eax, 3
+    jne .cdsub6
+    invoke fold_glyph, rdi           ; an arrow in the accent colour
+    cmp eax, 1
+    je .acc
+    cmp eax, 2
+    jne .zero
+.acc:
+    mov eax, [th_accent]
+    mov [r13+CD_CLRTEXT], eax
+    jmp .zero
+.cdsub6:
+    cmp eax, 6
+    jne .zero
+    mov eax, 0x10                    ; CDRF_NOTIFYPOSTPAINT: the icon of the right side goes over this cell
+    EPILOG 320
+.cdpost:
+    mov rax, [r13+CD_ITEMSPEC]
+    cmp rax, [r15+F_NVIS]
+    jae .zero
+    mov rcx, [r15+F_VIS]
+    mov eax, [rcx+rax*4]
+    shl rax, 6
+    add rax, [r15+F_ENTS]
+    mov rdi, rax
+    test dword [rdi+E_FLAGS], EF_EXB
+    jz .zero
+    invoke fold_icon, rdi
+    mov ebx, eax
+    mov dword [rsp+96], 0            ; LVIR_BOUNDS of the cell: the list tells where it is
+    mov dword [rsp+100], 6
+    mov dword [rsp+104], 0
+    mov dword [rsp+108], 0
+    invoke SendMessageW, [r15+F_HLIST], LVM_GETSUBITEMRECT, [r13+CD_ITEMSPEC], &rsp+96
+    mov eax, [rsp+108]
+    sub eax, [rsp+100]
+    sub eax, 16
+    shr eax, 1
+    add eax, [rsp+100]
+    mov r11d, eax                    ; y: the icon is centred in the row
+    mov r10d, [rsp+96]
+    add r10d, 3
+    invoke ImageList_Draw, [g_sysil], rbx, [r13+CD_HDC], r10, r11, 1       ; ILD_TRANSPARENT
     jmp .zero
 .rclick:
     invoke fold_ctx, rsi, r15
+    jmp .zero
+.click:
+    mov rax, [r13+44]                ; where the mouse was: NMITEMACTIVATE.ptAction
+    mov [rsp+96], rax
+    mov dword [rsp+104], 0
+    mov dword [rsp+108], -1
+    mov dword [rsp+112], 0
+    mov dword [rsp+116], 0
+    invoke SendMessageW, [r15+F_HLIST], LVM_SUBITEMHITTEST, 0, &rsp+96
+    cmp dword [rsp+108], 0
+    jl .zero
+    cmp dword [rsp+112], 3           ; the middle column
+    jne .zero
+    movsxd rdx, dword [rsp+108]
+    invoke fold_cycle, r15, rdx
     jmp .zero
 .dbl:
     mov eax, [r13+IA_ITEM]
@@ -2609,6 +3002,8 @@ fold_proc:
     movsxd rbp, eax
     test rbp, rbp
     js .zero
+    cmp ebx, 0x20                    ; Space: the next action of every selected item
+    je .kspace
     cmp ebx, VK_RETURN
     je .kopen
     cmp ebx, 0x71
@@ -2618,6 +3013,15 @@ fold_proc:
     cmp ebx, 0x27
     je .kright
     jmp .zero
+.kspace:
+    mov rbp, -1
+.ks:
+    invoke SendMessageW, [r15+F_HLIST], LVM_GETNEXTITEM, rbp, LVNI_SELECTED
+    movsxd rbp, eax
+    test rbp, rbp
+    js .zero
+    invoke fold_cycle, r15, rbp
+    jmp .ks
 .kopen:
     invoke fold_open_pair, r15, rbp
     jmp .zero

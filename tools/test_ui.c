@@ -650,8 +650,22 @@ static void toggle(int id){SendMessageW(GetDlgItem(fv,id),BM_CLICK,0,0);}
 static int crit(void){return (int)SendMessageW(GetDlgItem(fv,FID_CRIT),CB_GETCURSEL,0,0);}
 static void pickCrit(int n){SendMessageW(GetDlgItem(fv,FID_CRIT),CB_SETCURSEL,n,0);SendMessageW(fv,WM_COMMAND,MAKEWPARAM(FID_CRIT,CBN_SELCHANGE),(LPARAM)GetDlgItem(fv,FID_CRIT));}
 static void nameFilter(const wchar_t*t){SetWindowTextW(GetDlgItem(fv,FID_FILTER),t);}
-static int rowNamed(const wchar_t*n){wchar_t t[400];for(int i=0;i<frows();i++){fcell(i,0,t);wchar_t*p=t;while(*p==L' ')p++;if(*p==L'\x25BC'||*p==L'\x25B6')p+=2;if(!wcscmp(p,n))return i;}return -1;}
-static const wchar_t*statusOf(const wchar_t*n){static wchar_t t[400];int r=rowNamed(n);if(r<0)return L"(none)";fcell(r,1,t);return t;}
+static int rowNamed(const wchar_t*n){wchar_t t[400];for(int i=0;i<frows();i++){for(int c=0;c<8;c+=7){fcell(i,c,t);wchar_t*p=t;while(*p==L' ')p++;if(*p==L'\x25BC'||*p==L'\x25B6')p+=2;if(!wcscmp(p,n))return i;}}return -1;}
+/* what the middle column shows: -> <- not-equal equal skip */
+static const wchar_t*statusOf(const wchar_t*n){static wchar_t t[400];int r=rowNamed(n);if(r<0)return L"(none)";fcell(r,3,t);return t;}
+#define G_R L"\x2192"
+#define G_L L"\x2190"
+#define G_NE L"\x2260"
+#define G_EQ L"="
+#define G_SKIP L"\x2013"
+static void hdrText(int col,wchar_t*out){HWND h=(HWND)SendMessageW(GetDlgItem(fv,FID_LIST),LVM_GETHEADER,0,0);HDITEMW hd;memset(&hd,0,sizeof hd);hd.mask=HDI_TEXT;hd.pszText=out;hd.cchTextMax=100;out[0]=0;SendMessageW(h,HDM_GETITEMW,col,(LPARAM)&hd);}
+/* a mouse click in a cell of the list, as the mouse does it */
+static void clickCell(int row,int col){
+ HWND l=GetDlgItem(fv,FID_LIST);RECT r={col==0?LVIR_LABEL:LVIR_BOUNDS,col,0,0};SendMessageW(l,LVM_GETSUBITEMRECT,row,(LPARAM)&r);   /* the bounds of column 0 are the whole row */
+ LPARAM p=MAKELPARAM((r.left+r.right)/2,(r.top+r.bottom)/2);PostMessageW(l,WM_LBUTTONDOWN,MK_LBUTTON,p);PostMessageW(l,WM_LBUTTONUP,0,p);Sleep(150);   /* posted: the list tracks the mouse in a loop of its own until the button is up */
+}
+static void selectF(int row){LVITEMW it;memset(&it,0,sizeof it);it.state=it.stateMask=LVIS_SELECTED|LVIS_FOCUSED;SendMessageW(GetDlgItem(fv,FID_LIST),LVM_SETITEMSTATE,row,(LPARAM)&it);}
+static HWND syncDialog(void){return FindWindowW(L"BCSyncPreview",NULL);}
 static void fixedTime(const wchar_t*path,int hours){
  HANDLE h=CreateFileW(path,FILE_WRITE_ATTRIBUTES,7,NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,NULL);if(h==INVALID_HANDLE_VALUE)return;
  ULARGE_INTEGER u;u.QuadPart=132000000000000000ULL+(ULONGLONG)hours*36000000000ULL;FILETIME ft={u.LowPart,u.HighPart};SetFileTime(h,NULL,NULL,&ft);CloseHandle(h);
@@ -675,6 +689,48 @@ static void folderChecks(void){
  check(fv!=NULL,"folder compare session is open");
  if(!fv)return;
  check(waitRows(7),"the compare ran by itself: seven rows");
+ /* the icons: both sides draw one in front of the name (left: the list does, right: drawn over its own column) */
+ {HWND l=GetDlgItem(fv,FID_LIST);RECT rr;GetClientRect(l,&rr);HDC dc=GetDC(NULL),mdc=CreateCompatibleDC(dc);HBITMAP bm=CreateCompatibleBitmap(dc,rr.right,rr.bottom);SelectObject(mdc,bm);
+  HBRUSH wb=CreateSolidBrush(RGB(255,0,255));FillRect(mdc,&rr,wb);DeleteObject(wb);       /* a colour no row uses */
+  SendMessageW(l,WM_PRINTCLIENT,(WPARAM)mdc,PRF_CLIENT|PRF_ERASEBKGND);
+  RECT c0={LVIR_BOUNDS,0,0,0},c6={LVIR_BOUNDS,6,0,0},c3={LVIR_BOUNDS,3,0,0};
+  SendMessageW(l,LVM_GETSUBITEMRECT,0,(LPARAM)&c0);SendMessageW(l,LVM_GETSUBITEMRECT,0,(LPARAM)&c6);
+  int own6=0,own0=0;
+  for(int y=c0.top;y<c0.bottom;y++){for(int x=c0.left;x<c0.left+22;x++){COLORREF px=GetPixel(mdc,x,y);int dark=(GetRValue(px)+GetGValue(px)+GetBValue(px))<600;if(dark)own0++;}}
+  for(int y=c6.top;y<c6.bottom;y++){for(int x=c6.left;x<c6.right;x++){COLORREF px=GetPixel(mdc,x,y);int dark=(GetRValue(px)+GetGValue(px)+GetBValue(px))<600;if(dark)own6++;}}
+  printf("icon pixels: left %d right %d (cells %ld,%ld-%ld,%ld and %ld,%ld-%ld,%ld)\n",own0,own6,c0.left,c0.top,c0.right,c0.bottom,c6.left,c6.top,c6.right,c6.bottom);
+  check(own0>20,"the left name has an icon in front of it");
+  check(own6>20,"the right name has one too");
+  DeleteObject(bm);DeleteDC(mdc);ReleaseDC(NULL,dc);(void)c3;}
+ /* the mirrored list */
+ {wchar_t h[100],n[400];int ok=1;
+  static const wchar_t*want[8]={L"\xC774\xB984",L"\xD06C\xAE30",L"\xB0A0\xC9DC",L"*",L"\xB0A0\xC9DC",L"\xD06C\xAE30",L"",L"\xC774\xB984"};
+  for(int c=0;c<8;c++){hdrText(c,h);if(wcscmp(h,want[c])){ok=0;printf("column %d is called another name\n",c);}}
+  check(ok,"columns: name, size, date | action | date, size, icon, name");
+  int r=rowNamed(L"only_left.cs");
+  fcell(r,0,n);check(wcsstr(n,L"only_left.cs")!=NULL,"only on the left: the left name is there");
+  fcell(r,7,n);check(!n[0],"and the right name is empty");fcell(r,4,n);check(!n[0],"so is the right date");fcell(r,5,n);check(!n[0],"and the right size");
+  fcell(r,1,n);check(!wcscmp(n,L"1"),"the left size is there");
+  r=rowNamed(L"only_right.json");fcell(r,0,n);check(!n[0],"only on the right: the left name is empty");fcell(r,7,n);check(wcsstr(n,L"only_right.json")!=NULL,"the right name is there");
+  fcell(r,2,n);check(!n[0],"no left date");
+  check(!wcscmp(statusOf(L"only_left.cs"),G_R)&&!wcscmp(statusOf(L"only_right.json"),G_L),"a new item goes over to the other side: -> and <-");
+  check(!wcscmp(statusOf(L"same.txt"),G_EQ)&&!wcscmp(statusOf(L"diff.txt"),G_L),"equal: =, different: the newer one is copied");
+  /* a click on the middle cell turns through the actions; a click anywhere else does not */
+  r=rowNamed(L"only_left.cs");
+  clickCell(r,0);check(!wcscmp(statusOf(L"only_left.cs"),G_R),"a click on the name changes nothing");
+  clickCell(r,3);check(!wcscmp(statusOf(L"only_left.cs"),G_SKIP),"a click on the middle cell: skip");
+  clickCell(r,3);check(!wcscmp(statusOf(L"only_left.cs"),G_R),"again: copy");
+  r=rowNamed(L"diff.txt");
+  clickCell(r,3);check(!wcscmp(statusOf(L"diff.txt"),G_SKIP),"two different files: <- becomes skip");
+  clickCell(r,3);check(!wcscmp(statusOf(L"diff.txt"),G_R),"then ->");
+  clickCell(r,3);check(!wcscmp(statusOf(L"diff.txt"),G_L),"then <- again");
+  r=rowNamed(L"same.txt");clickCell(r,3);check(!wcscmp(statusOf(L"same.txt"),G_EQ),"equal files have no action to change");
+  r=rowNamed(L"only_right.json");selectF(r);
+  SendMessageW(GetDlgItem(fv,FID_LIST),WM_KEYDOWN,VK_SPACE,0);check(!wcscmp(statusOf(L"only_right.json"),G_SKIP),"Space: the next action of the selected item");
+  SendMessageW(GetDlgItem(fv,FID_LIST),WM_KEYDOWN,VK_SPACE,0);check(!wcscmp(statusOf(L"only_right.json"),G_L),"and again");
+  /* the hint under the list */
+  {RECT rl,rh;GetWindowRect(GetDlgItem(fv,FID_LIST),&rl);GetWindowRect(GetDlgItem(fv,183),&rh);
+   check(rh.top>=rl.bottom&&rh.bottom<=rl.bottom+60,"a hint line under the list");}}
  /* toolbar */
  {RECT rp,rc,rs,r1,r2,r3,r4,rcb,rg,rf,rl,rv;HWND p=GetDlgItem(fv,FID_EDIT_A);
   GetWindowRect(p,&rp);GetWindowRect(GetDlgItem(fv,105),&rc);GetWindowRect(GetDlgItem(fv,FID_STOP),&rs);
@@ -704,15 +760,15 @@ static void folderChecks(void){
   (void)opt;}
  /* compare by */
  check(crit()==0&&checked(FID_CHK_SIZE)&&checked(FID_CHK_MTIME)&&!checked(FID_CHK_CONT)&&!checked(FID_CHK_CRC),"compare by starts as size + time");
- check(!wcscmp(statusOf(L"in.md"),L"\xAC19\xC74C")&&!wcscmp(statusOf(L"diff.txt"),L"\xB2E4\xB984"),"in.md is the same, diff.txt differs");
+ check(!wcscmp(statusOf(L"in.md"),G_EQ)&&!wcscmp(statusOf(L"diff.txt"),G_L),"in.md is the same, diff.txt differs (the right one is newer: copy to the left)");
  pickCrit(3);Sleep(100);waitRows(7);Sleep(400);
  check(crit()==3&&checked(FID_CHK_SIZE)&&!checked(FID_CHK_MTIME)&&checked(FID_CHK_CONT),"choosing 'content' sets the check boxes");
- for(int i=0;i<60&&wcscmp(statusOf(L"in.md"),L"\xB2E4\xB984");i++)Sleep(50);
- check(!wcscmp(statusOf(L"in.md"),L"\xB2E4\xB984"),"and compares again: in.md differs by its content");
+ for(int i=0;i<60&&wcscmp(statusOf(L"in.md"),G_NE);i++)Sleep(50);
+ check(!wcscmp(statusOf(L"in.md"),G_NE),"and compares again: in.md differs by its content (equal times: no direction)");
  pickCrit(4);for(int i=0;i<60&&!checked(FID_CHK_CRC);i++)Sleep(50);Sleep(400);
  check(crit()==4&&checked(FID_CHK_CRC)&&!checked(FID_CHK_CONT),"CRC32");
  pickCrit(1);Sleep(500);
- check(crit()==1&&checked(FID_CHK_SIZE)&&!checked(FID_CHK_MTIME)&&!wcscmp(statusOf(L"in.md"),L"\xAC19\xC74C"),"size only: in.md is the same again");
+ check(crit()==1&&checked(FID_CHK_SIZE)&&!checked(FID_CHK_MTIME)&&!wcscmp(statusOf(L"in.md"),G_EQ),"size only: in.md is the same again");
  pickCrit(2);Sleep(500);
  check(crit()==2&&!checked(FID_CHK_SIZE)&&checked(FID_CHK_MTIME),"time only");
  pickCrit(0);Sleep(500);
@@ -741,6 +797,22 @@ static void folderChecks(void){
  toggle(FID_SAME);nameFilter(L"");check(frows()==7,"an empty filter shows everything");
  /* a collapsed folder is listed open while a name filter is set */
  nameFilter(L"");
+ /* a sync from the middle column: only what is shown goes over */
+ {pickCrit(0);Sleep(500);waitRows(7);
+  int r=rowNamed(L"only_left.cs");clickCell(r,3);                      /* skip it */
+  check(!wcscmp(statusOf(L"only_left.cs"),G_SKIP),"only_left.cs is set to skip");
+  menuAnswer=5;PostMessageW(fv,WM_COMMAND,MAKEWPARAM(144,BN_CLICKED),(LPARAM)GetDlgItem(fv,144));
+  HWND dlg=NULL;for(int i=0;i<100&&!dlg;i++){dlg=syncDialog();if(!dlg)Sleep(50);}
+  check(dlg!=NULL,"the plan is shown first");
+  check(GetFileAttributesW(L"fc\\b\\\xBCF4\xACE0\xC11C.txt")==INVALID_FILE_ATTRIBUTES,"nothing has been copied yet");
+  if(dlg)PostMessageW(dlg,WM_COMMAND,1,0);                              /* its OK button */
+  for(int i=0;i<100&&GetFileAttributesW(L"fc\\b\\\xBCF4\xACE0\xC11C.txt")==INVALID_FILE_ATTRIBUTES;i++)Sleep(50);
+  Sleep(300);
+  check(GetFileAttributesW(L"fc\\b\\\xBCF4\xACE0\xC11C.txt")!=INVALID_FILE_ATTRIBUTES,"a new item on the left was copied to the right");
+  check(GetFileAttributesW(L"fc\\a\\only_right.json")!=INVALID_FILE_ATTRIBUTES,"a new item on the right was copied to the left");
+  check(GetFileAttributesW(L"fc\\b\\only_left.cs")==INVALID_FILE_ATTRIBUTES,"the item set to skip was not copied");
+  check(holds(L"fc\\a\\diff.txt","right!\r\n"),"of two different files the newer one went over");
+  menuAnswer=0;}
 }
 static DWORD WINAPI watcher(void*arg){
  (void)arg;

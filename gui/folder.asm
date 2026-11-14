@@ -26,6 +26,7 @@ extern th_panelbrush, th_bgbrush
 extern mk, reg_class, scl, set_status, msgbox, browse_save
 extern lv_dark_header, theme_checks, mk_btn, mk_chk, mk_lbl, mk_edit, get_chk, ctl_color, pb_create, pb_layout, pb_load, pb_collect, pb_command
 extern GetWindowTextLengthW, excl_match2, tip_add, ShowWindow, CharLowerBuffW, CharLowerW, g_iconfont
+extern SHGetFileInfoW, ImageList_Draw, th_accent
 extern vec_push, fmt_size, fmt_time, excl_match, sb_init, sb_append, sb_append_esc, sb_free, write_utf8
 extern NormalizeString, GetNamedSecurityInfoW, SetNamedSecurityInfoW, LocalFree, SetFileAttributesW, SetFileTime, icon_set, g_copyr, g_copyl, g_mover, g_movel, g_del, g_sync, g_pause, g_report, g_snap, g_expand, g_collapse, GetLastError, GetCurrentProcessId, MoveFileW, input_box, wcsncpy, wcstoul, GetSystemTimeAsFileTime, set_status_part, str_dup, add_session, set_tab_title, type_for_path, ext_launch, g_policy
 
@@ -106,6 +107,17 @@ extern g_batch, g_rep_path, g_exitcode, g_hframe, g_snap_path
 %define ID_CRIT      180             ; compare by: size + time, size, time, content, CRC32, ...
 %define ID_LBL_FILTER 181
 %define ID_FILTER    182             ; shows only the names that contain this text
+%define ID_LBL_HINT  183
+%define EF_ACTSH     26              ; bits 26..28 of E_FLAGS: the action chosen in the middle column
+%define DI_IMAGE     60
+%define CD_RC        40
+%define CD_SUBSTATE  0x00030001      ; ITEMPREPAINT | SUBITEM
+%define CD_SUBPOST   0x00030002      ; ITEMPOSTPAINT | SUBITEM
+%define LVM_SETIMAGELIST 0x1003
+%define LVM_REDRAWITEMS 0x1015
+%define LVM_SUBITEMHITTEST 0x1039
+%define LVM_GETSUBITEMRECT 0x1038
+%define LVIF_IMAGE   2
 %define CR_N         6               ; presets of the compare-by box (row 6 is "custom")
 %define ID_CHK_ASFILE 170
 %define ID_CHK_LOOSE 174
@@ -223,12 +235,18 @@ WSTR s_b_collap, "모두 접음"
 WSTR s_b_pause, "일시중지"
 WSTR s_b_resume, "계속"
 WSTR h_name, "이름"
+WSTR h_size, "크기"
+WSTR h_date, "날짜"
+WSTR h_act, "*"
 WSTR h_status, "상태"
 WSTR h_dir, "방향"
 WSTR s_ar_r, "→"
 WSTR s_ar_l, "←"
 WSTR s_ar_eq, "="
 WSTR s_ar_ne, "≠"
+WSTR s_ar_skip, "–"
+WSTR s_hint, "가운데 열을 누르거나 Space를 눌러 항목마다 동작(→ 오른쪽으로 복사, ← 왼쪽으로 복사, – 건너뜀)을 바꿉니다. 실행은 동기화 단추의 '표시된 동작대로'를 쓰세요."
+WSTR s_sy5, "표시된 동작대로 (가운데 열의 → ← –)"
 WSTR h_sizea, "왼쪽 크기"
 WSTR h_mta, "왼쪽 수정 시각"
 WSTR h_sizeb, "오른쪽 크기"
@@ -320,12 +338,25 @@ WSTR s_slash2, "/"
 WSTR s_marker_open, "▼ "
 WSTR s_marker_closed, "▶ "
 WSTR s_sp2, "  "
+WSTR s_x, "x"
 
 align 8
 st_text: dq st_same, st_diff, st_lonly, st_ronly, st_type
-col_text: dq h_name, h_status, h_dir, h_sizea, h_mta, h_sizeb, h_mtb, h_attr
-col_w:   dd 380, 90, 50, 110, 150, 110, 150, 140
-col_fmt: dd 0, 0, 0, 1, 0, 1, 0, 0
+; the list, left to right: name, size, date | action | date, size, icon, name of the other side
+col_text: dq h_name, h_size, h_date, h_act, h_date, h_size, s_empty, h_name
+col_w:   dd 330, 90, 150, 40, 150, 90, 26, 330
+col_fmt: dd 0, 1, 0, 2, 0, 1, 0, 0
+; column of the list -> kind of cell for fold_cell (0 name, 3 size A, 4 time A, 2 action, 6 time B, 5 size B,
+; 9 name B, 10 nothing: the icon of side B is drawn over this column)
+col_kind: dd 0, 3, 4, 2, 6, 5, 10, 9
+
+section .bss
+alignb 8
+g_sysil:   resq 1                    ; the system list of small icons
+ico_n:     resq 1                    ; types of file whose icon index is known
+ico_keys:  resw 16*256               ; their keys (extension, lower case)
+ico_vals:  resd 256
+ico_sfi:   resb 704                  ; SHFILEINFOW
 
 section .text
 
